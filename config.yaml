@@ -1,0 +1,73 @@
+# Zinli Monitor Configuration File
+# Sistema de monitoreo de tasas de cambio
+
+# General Settings
+general:
+  debug: false
+  log_level: "INFO"
+  timeout: 30
+  max_retries: 3
+
+# BCV Provider Settings
+bcv:
+  api_url: "https://bcv.today/api/v1/rate.json"
+  web_url: "https://bcv.org.ve"
+  timezone: "America/Caracas"
+  fallback_enabled: true
+  timeout: 10
+
+# Binance P2P Settings
+binance_p2p:
+  base_url: "https://p2p.binance.com"
+  endpoint: "/bapi/c2c/v2/friendly/c2c/adv/search"
+  default_limit: 20
+  timeout: 20
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+  
+  # USDT/VES Settings
+  ves:
+    fiat: "VES"
+    filter_merchant: true
+    limit: 20
+    
+  # USDT/USD Zinli Settings  
+  usd_zinli:
+    fiat: "USD"
+    payment_method: "zinli"
+    filter_merchant: true
+    limit: 20
+
+# Syklo Provider Settings
+syklo:
+  base_url: "https://syklo-orderbook.ddns.net"
+  timeout: 100
+  retries: 3
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  
+  # VES/USDC Settings
+  ves_usdc:
+    send_pms: "VES:VE:VEBN1,VES:VE:VEBN2,VES:VE:VEBN29"
+    receive_pms: "USDC:ALL:SYKLO"
+    method_aliases:
+      VEBN1: "Banco de Venezuela"
+      VEBN2: "Banesco"
+      VEBN29: "BNC"
+    send_methods:
+      - "VEBN1"
+      - "VEBN2"
+      - "VEBN29"
+      
+  # USDC/USD Settings
+  usdc_usd:
+    send_pms: "USDC:ALL:SYKLO"
+    receive_pms: "USD:ALL:ZI"
+    send_methods:
+      - "USD"
+      - "ZI"
+
+# Output Settings
+output:
+  format: "table"  # table, json, csv
+  colors: true
+  decimal_places: 2
+  show_timestamp: true
