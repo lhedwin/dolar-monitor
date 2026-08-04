@@ -67,6 +67,24 @@ Nota: el agente guarda datos en `zinli_monitor.db` y actualiza el menú de la ba
 - Archivo: `zinli_monitor.db` en la raíz del proyecto
 - Tablas principales: `bcv_rates`, `binance_p2p_prices`, `consolidated_data`, `syklo_orderbook`
 
+Nota: el archivo de base de datos no se versiona en el repositorio (está en `.gitignore`). Para facilitar que otros usuarios arranquen la app sin un `.db` real, se incluye un script de inicialización.
+
+Crear la base de datos y agregar datos de ejemplo:
+
+```bash
+# Crea ./zinli_monitor.db con 8 filas de ejemplo por tabla (por defecto)
+python3 init_db.py --path ./zinli_monitor.db
+
+# Especificar distinto tamaño de semilla
+python3 init_db.py --path ./zinli_monitor.db --sample-size 16
+
+# Forzar sobrescritura (se crea respaldo .bak)
+python3 init_db.py --path ./zinli_monitor.db --force
+
+# Crear solo esquema sin datos de ejemplo
+python3 init_db.py --no-sample
+```
+
 Consultas útiles:
 
 ```bash
