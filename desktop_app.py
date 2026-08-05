@@ -11,9 +11,9 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QGridLayout, QTabWidget, QMessageBox,
-    QTextEdit, QSpinBox, QDialog
+    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit
 )
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate
 from PyQt6.QtGui import QFont
 
 # Agregar ruta del src al path
@@ -158,6 +158,24 @@ class ZinliMonitorDesktopApp(QWidget):
         
         layout_principal.addWidget(self.tab_widget)
         layout_principal.setSpacing(6)  # Reducir spacing entre tab widget y otros elementos
+
+        # Footer global (siempre visible incluso al cambiar de pestañas)
+        footer_layout = QHBoxLayout()
+        footer_layout.setContentsMargins(15, 5, 15, 5)
+
+        self.lbl_last_updated = QLabel("Datos actualizados: --/--/----:--:--:--")
+        self.lbl_last_updated.setObjectName("Subtitulo")
+
+        lbl_copyright = QLabel("© 2026 Edwin López — Licensed under GNU GPL v3")
+        lbl_copyright.setObjectName("Subtitulo")
+        lbl_copyright.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        footer_layout.addWidget(self.lbl_last_updated)
+        footer_layout.addStretch()
+        footer_layout.addWidget(lbl_copyright)
+
+        layout_principal.addLayout(footer_layout)
+
         self.setLayout(layout_principal)
         
         # Cargar datos iniciales
@@ -206,22 +224,6 @@ class ZinliMonitorDesktopApp(QWidget):
         btn_actualizar.clicked.connect(self.refresh_dashboard)
         layout.addWidget(btn_actualizar)
 
-        # Layout del Footer (Datos actualizados y Copyright)
-        footer_layout = QHBoxLayout()
-        footer_layout.setContentsMargins(0, 5, 0, 0)
-        
-        self.lbl_last_updated = QLabel("Datos actualizados: --/--/----:--:--:--")
-        self.lbl_last_updated.setObjectName("Subtitulo")
-        
-        lbl_copyright = QLabel("© 2026 Edwin López — Licensed under GNU GPL v3")
-        lbl_copyright.setObjectName("Subtitulo")
-        lbl_copyright.setAlignment(Qt.AlignmentFlag.AlignRight)
-        
-        footer_layout.addWidget(self.lbl_last_updated)
-        footer_layout.addStretch()
-        footer_layout.addWidget(lbl_copyright)
-        
-        layout.addLayout(footer_layout)
 
         self.dashboard_tab.setLayout(layout)
     
@@ -267,15 +269,62 @@ class ZinliMonitorDesktopApp(QWidget):
         lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_titulo)
 
-        # Selector de días
-        days_layout = QHBoxLayout()
-        days_layout.addWidget(QLabel("Período (días):"))
+        # Selector de modo de búsqueda y controles dinámicos
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Modo:"))
+        self.history_mode = QComboBox()
+        self.history_mode.addItems([
+            "Últimos N días",
+            "Día específico",
+            "Mes específico",
+            "Mes en curso",
+            "Año específico",
+            "Año en curso",
+        ])
+        self.history_mode.setCurrentIndex(0)
+        self.history_mode.currentIndexChanged.connect(self._on_history_mode_change)
+        mode_layout.addWidget(self.history_mode)
+
+        # Controles auxiliares (se muestran/ocultan según modo)
+        # 1) SpinBox para N días
+        self.days_label = QLabel("Período (días):")
         self.days_spinbox = QSpinBox()
         self.days_spinbox.setRange(1, 365)
         self.days_spinbox.setValue(30)
-        days_layout.addWidget(self.days_spinbox)
-        days_layout.addStretch()
-        layout.addLayout(days_layout)
+        mode_layout.addWidget(self.days_label)
+        mode_layout.addWidget(self.days_spinbox)
+
+        # 2) DateEdit para día específico
+        self.date_label = QLabel("Fecha:")
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDate(QDate.currentDate())
+        self.date_label.setVisible(False)
+        self.date_edit.setVisible(False)
+        mode_layout.addWidget(self.date_label)
+        mode_layout.addWidget(self.date_edit)
+
+        # 3) Month/Year selectors para mes específico y año
+        self.month_label = QLabel("Mes:")
+        self.month_spin = QSpinBox()
+        self.month_spin.setRange(1, 12)
+        self.month_spin.setValue(QDate.currentDate().month())
+        self.month_label.setVisible(False)
+        self.month_spin.setVisible(False)
+        mode_layout.addWidget(self.month_label)
+        mode_layout.addWidget(self.month_spin)
+
+        self.year_label = QLabel("Año:")
+        self.year_spin = QSpinBox()
+        self.year_spin.setRange(2000, 2100)
+        self.year_spin.setValue(QDate.currentDate().year())
+        self.year_label.setVisible(False)
+        self.year_spin.setVisible(False)
+        mode_layout.addWidget(self.year_label)
+        mode_layout.addWidget(self.year_spin)
+
+        mode_layout.addStretch()
+        layout.addLayout(mode_layout)
 
         # Área de texto para mostrar historial
         self.history_text = QTextEdit()
@@ -352,34 +401,399 @@ class ZinliMonitorDesktopApp(QWidget):
         except Exception as e:
             self.arbitrage_text.setText(f"Error: {e}")
     
+    def _extract_price(self, item: dict) -> Optional[float]:
+        """Extrae el precio de un elemento histórico intentando varias claves conocidas."""
+        if not isinstance(item, dict):
+            return None
+        for k in ("dollar", "USD", "rate", "price"):
+            v = item.get(k)
+            if v is None:
+                continue
+            try:
+                return float(v)
+            except Exception:
+                try:
+                    return float(str(v).replace(',', '.'))
+                except Exception:
+                    continue
+        return None
+
+    def _on_history_mode_change(self, index: int):
+        """Muestra/oculta controles según modo seleccionado."""
+        mode = self.history_mode.currentText()
+        # Hide all auxiliary controls first
+        self.days_label.setVisible(False)
+        self.days_spinbox.setVisible(False)
+        self.date_label.setVisible(False)
+        self.date_edit.setVisible(False)
+        self.month_label.setVisible(False)
+        self.month_spin.setVisible(False)
+        self.year_label.setVisible(False)
+        self.year_spin.setVisible(False)
+
+        if mode == "Últimos N días":
+            self.days_label.setVisible(True)
+            self.days_spinbox.setVisible(True)
+        elif mode == "Día específico":
+            self.date_label.setVisible(True)
+            self.date_edit.setVisible(True)
+        elif mode == "Mes específico":
+            self.month_label.setVisible(True)
+            self.month_spin.setVisible(True)
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+        elif mode == "Mes en curso":
+            # mostrar solo año/mes (mes fijado al actual)
+            self.month_label.setVisible(False)
+            self.month_spin.setVisible(False)
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+            self.year_spin.setValue(QDate.currentDate().year())
+            self.year_spin.setEnabled(False)
+        elif mode == "Año específico":
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+        elif mode == "Año en curso":
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+            # Fijar año al actual y deshabilitar edición
+            self.year_spin.setValue(QDate.currentDate().year())
+            self.year_spin.setEnabled(False)
+        else:
+            self.days_label.setVisible(True)
+            self.days_spinbox.setVisible(True)
+
     def get_history(self):
-        """Obtiene historial BCV"""
-        days = self.days_spinbox.value()
-        self.history_text.setText(f"Obteniendo historial de {days} días...")
-        
+        """Obtiene historial BCV y soporta varios modos de consulta."""
+        mode = self.history_mode.currentText()
+        self.history_text.setText("Obteniendo historial...")
+
         try:
-            history = self.monitor.get_bcv_history(days)
-            
-            text = f"Período: {history.get('start_date')} a {history.get('end_date')}\n"
-            text += f"Total registros: {history.get('count')}\n"
-            text += f"Fuente: {history.get('source')}\n\n"
-            
-            if history.get('rates'):
-                text += "Últimos 10 registros:\n"
-                for i, rate in enumerate(history['rates'][-10:], 1):
-                    rate_value = rate.get("USD", rate.get("dollar", "N/A"))
-                    text += f"{i}. {rate.get('date')}: {rate_value} Bs\n"
-                
+            # Preparar parámetros según modo
+            if mode == "Últimos N días":
+                days = self.days_spinbox.value()
+                history = self.monitor.get_bcv_history(days)
+                if not isinstance(history, dict):
+                    # Muestra el error tal cual provenga del proveedor
+                    self.history_text.setPlainText(f"Error obteniendo historial: {history}")
+                    return
+                rates = history.get('rates', []) or []
+                start_date = history.get('start_date')
+                end_date = history.get('end_date')
+                title = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
+
+                # Reusar visualización previa (bloques horizontales)
+                n = len(rates)
+                BLOCK_SIZE = 15
+                text = title
+                if n == 0:
+                    text += "No hay registros para el período solicitado.\n"
+                elif n <= BLOCK_SIZE:
+                    text += "Registros:\n"
+                    for i, rate in enumerate(rates, 1):
+                        price = self._extract_price(rate)
+                        rate_str = f"{price:.2f}" if price is not None else (rate.get('USD', rate.get('dollar', 'N/A')) if isinstance(rate, dict) else str(rate))
+                        text += f"{i}. {rate.get('date') if isinstance(rate, dict) else 'N/A'}: {rate_str} Bs\n"
+                else:
+                    text += f"Mostrando {n} registros.\n\n"
+                    num_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    for row in range(BLOCK_SIZE):
+                        row_parts = []
+                        any_in_row = False
+                        for b in range(num_blocks):
+                            idx = b * BLOCK_SIZE + row
+                            if idx < n:
+                                entry = rates[idx]
+                                price = self._extract_price(entry)
+                                rate_str = f"{price:.2f}" if price is not None else (entry.get('USD', entry.get('dollar', 'N/A')) if isinstance(entry, dict) else str(entry))
+                                cell = f"{idx+1}. {entry.get('date') if isinstance(entry, dict) else 'N/A'}: {rate_str}"
+                                any_in_row = True
+                            else:
+                                cell = ""
+                            row_parts.append(cell.ljust(32))
+                        if not any_in_row:
+                            break
+                        text += '  '.join(row_parts) + "\n"
+                    text += "\n"
+
                 # Estadísticas
-                rates = [float(r.get("USD", r.get("dollar", 0))) for r in history['rates']]
-                if rates:
-                    text += "\nEstadísticas:\n"
-                    text += f"  Mínimo: {min(rates):.2f} Bs\n"
-                    text += f"  Máximo: {max(rates):.2f} Bs\n"
-                    text += f"  Promedio: {sum(rates)/len(rates):.2f} Bs\n"
-                    text += f"  Variación: {((max(rates) - min(rates)) / min(rates) * 100):.2f}%\n"
-            
-            self.history_text.setText(text)
+                numeric_rates = [self._extract_price(r) for r in rates if self._extract_price(r) is not None]
+                stats_html = ""
+                if numeric_rates:
+                    minimo = min(numeric_rates)
+                    maximo = max(numeric_rates)
+                    promedio = sum(numeric_rates) / len(numeric_rates)
+                    try:
+                        variacion = ((maximo - minimo) / minimo * 100)
+                    except ZeroDivisionError:
+                        variacion = 0.0
+                    sign_variacion = f"{variacion:+.2f}%"
+                    if variacion > 0:
+                        color = "#10B981"
+                        bg = "rgba(16,185,129,0.12)"
+                    elif variacion < 0:
+                        color = "#EF4444"
+                        bg = "rgba(239,68,68,0.12)"
+                    else:
+                        color = "#9CA3AF"
+                        bg = "transparent"
+                    stats_html += "<br><b>Estadísticas:</b><br>"
+                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+
+                html = f'<div style="font-family: monospace; color: #d1d5db;">'
+                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}</pre>'
+                html += stats_html
+                html += '</div>'
+
+                self.history_text.setHtml(html)
+
+            elif mode == "Día específico":
+                date_q = self.date_edit.date()
+                date_str = date_q.toString("yyyy-MM-dd")
+                result = self.monitor.get_bcv_rate_by_date(date_str)
+                if isinstance(result, dict) and 'rate' in result:
+                    price = result.get('rate')
+                    src = result.get('source')
+                    ts = result.get('timestamp')
+                    out = f"Fecha: {date_str}    Precio: {float(price):.2f} Bs\nFuente: {src}\n"
+                    self.history_text.setPlainText(out)
+                else:
+                    self.history_text.setPlainText(f"No se encontró dato para {date_str}: {result}")
+
+            elif mode == "Mes específico":
+                month = int(self.month_spin.value())
+                year = int(self.year_spin.value())
+                from calendar import monthrange
+                start_date = f"{year}-{month:02d}-01"
+                last_day = monthrange(year, month)[1]
+                end_date = f"{year}-{month:02d}-{last_day:02d}"
+                history = self.monitor.get_bcv_history(0, start_date, end_date)
+                if not isinstance(history, dict):
+                    self.history_text.setPlainText(f"Error obteniendo historial: {history}")
+                    return
+                rates = history.get('rates', []) or []
+
+                # Construir listado y estadísticas
+                text = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
+                lines = []
+                numeric_rates = []
+                for i, r in enumerate(rates, 1):
+                    price = self._extract_price(r)
+                    if price is not None:
+                        numeric_rates.append(price)
+                        rate_str = f"{price:.2f}"
+                    else:
+                        rate_str = (r.get('USD', r.get('dollar', 'N/A')) if isinstance(r, dict) else str(r))
+                    lines.append(f"{i}. {r.get('date') if isinstance(r, dict) else 'N/A'}: {rate_str} Bs")
+
+                # Estadísticas si hay datos numéricos
+                stats_html = ""
+                if numeric_rates:
+                    minimo = min(numeric_rates)
+                    maximo = max(numeric_rates)
+                    promedio = sum(numeric_rates) / len(numeric_rates)
+                    try:
+                        variacion = ((maximo - minimo) / minimo * 100)
+                    except ZeroDivisionError:
+                        variacion = 0.0
+                    sign_variacion = f"{variacion:+.2f}%"
+                    if variacion > 0:
+                        color = "#10B981"
+                        bg = "rgba(16,185,129,0.12)"
+                    elif variacion < 0:
+                        color = "#EF4444"
+                        bg = "rgba(239,68,68,0.12)"
+                    else:
+                        color = "#9CA3AF"
+                        bg = "transparent"
+                    stats_html += "<br><b>Estadísticas:</b><br>"
+                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+
+                html = f'<div style="font-family: monospace; color: #d1d5db;">'
+                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}'
+                html += "\n".join(lines)
+                html += '</pre>'
+                html += stats_html
+                html += '</div>'
+
+                self.history_text.setHtml(html)
+
+            elif mode == "Mes en curso":
+                # Mes actual desde primer día hasta hoy
+                today = QDate.currentDate()
+                year = today.year()
+                month = today.month()
+                # Asegurar controles reflejen el mes/año actual para evitar residuos de consultas previas
+                try:
+                    self.year_spin.setValue(year)
+                    self.month_spin.setValue(month)
+                except Exception:
+                    pass
+                from calendar import monthrange
+                start_date = f"{year}-{month:02d}-01"
+                end_date = today.toString("yyyy-MM-dd")
+                history = self.monitor.get_bcv_history(0, start_date, end_date)
+                if not isinstance(history, dict):
+                    self.history_text.setPlainText(f"Error obteniendo historial: {history}")
+                    return
+                rates = history.get('rates', []) or []
+
+                text = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
+                lines = []
+                numeric_rates = []
+                for i, r in enumerate(rates, 1):
+                    price = self._extract_price(r)
+                    if price is not None:
+                        numeric_rates.append(price)
+                        rate_str = f"{price:.2f}"
+                    else:
+                        rate_str = (r.get('USD', r.get('dollar', 'N/A')) if isinstance(r, dict) else str(r))
+                    lines.append(f"{i}. {r.get('date') if isinstance(r, dict) else 'N/A'}: {rate_str} Bs")
+
+                # Estadísticas si hay datos numéricos
+                stats_html = ""
+                if numeric_rates:
+                    minimo = min(numeric_rates)
+                    maximo = max(numeric_rates)
+                    promedio = sum(numeric_rates) / len(numeric_rates)
+                    try:
+                        variacion = ((maximo - minimo) / minimo * 100)
+                    except ZeroDivisionError:
+                        variacion = 0.0
+                    sign_variacion = f"{variacion:+.2f}%"
+                    if variacion > 0:
+                        color = "#10B981"
+                        bg = "rgba(16,185,129,0.12)"
+                    elif variacion < 0:
+                        color = "#EF4444"
+                        bg = "rgba(239,68,68,0.12)"
+                    else:
+                        color = "#9CA3AF"
+                        bg = "transparent"
+                    stats_html += "<br><b>Estadísticas:</b><br>"
+                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
+                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+
+                html = f'<div style="font-family: monospace; color: #d1d5db;">'
+                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}'
+                html += "\n".join(lines)
+                html += '</pre>'
+                html += stats_html
+                html += '</div>'
+
+                self.history_text.setHtml(html)
+
+            elif mode in ("Año específico", "Año en curso"):
+                year = int(self.year_spin.value())
+                from datetime import datetime
+                if mode == "Año en curso":
+                    # asegurar selector refleje el año actual
+                    current_year = datetime.now().year
+                    try:
+                        self.year_spin.setValue(current_year)
+                    except Exception:
+                        pass
+                    start_date = f"{current_year}-01-01"
+                    end_date = datetime.now().strftime("%Y-%m-%d")
+                else:
+                    start_date = f"{year}-01-01"
+                    end_date = f"{year}-12-31"
+
+                history = self.monitor.get_bcv_history(0, start_date, end_date)
+                if not isinstance(history, dict):
+                    self.history_text.setPlainText(f"Error obteniendo historial: {history}")
+                    return
+                rates = history.get('rates', []) or []
+
+                # Agrupar por mes
+                from collections import defaultdict
+                months = defaultdict(list)
+                for r in rates:
+                    d = r.get('date') if isinstance(r, dict) else None
+                    if not d:
+                        continue
+                    m = d[:7]  # YYYY-MM
+                    months[m].append(r)
+
+                # Construir tabla de estadísticas mensuales: primer día, último día, variación
+                rows = []
+                all_numeric = []
+                for m in sorted(months.keys()):
+                    month_rates = months[m]
+                    # ordenar por fecha asc
+                    month_rates.sort(key=lambda x: x.get('date'))
+                    first = month_rates[0]
+                    last = month_rates[-1]
+                    p_first = self._extract_price(first)
+                    p_last = self._extract_price(last)
+                    if p_first is None or p_last is None:
+                        continue
+                    try:
+                        var = ((p_last - p_first) / p_first) * 100
+                    except ZeroDivisionError:
+                        var = 0.0
+                    rows.append((m, p_first, p_last, var))
+                    all_numeric.extend([p_first, p_last])
+
+                # Mapear nombres de meses en español
+                months_es = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+
+                # Render HTML en tabla para mejor alineación
+                html = '<div style="color: #d1d5db; font-family: sans-serif;">'
+                display_year = datetime.now().year if mode == "Año en curso" else year
+                html += f'<h3>Resumen por mes para {display_year}</h3>'
+                html += '<table style="border-collapse: collapse; width: 100%; font-family: monospace; color:#d1d5db;">'
+                html += '<tr style="border-bottom:1px solid #102a3f;"><th style="text-align:left; padding:6px 8px;">Mes</th><th style="text-align:right; padding:6px 8px;">Primer día</th><th style="text-align:right; padding:6px 8px;">Último día</th><th style="text-align:right; padding:6px 8px;">Variación</th></tr>'
+                for m, p1, p2, var in rows:
+                    y, mm = m.split('-')
+                    mm_i = int(mm)
+                    month_label = f"{months_es[mm_i-1]} de {y}"
+                    sign = f"{var:+.2f}%"
+                    color = '#10B981' if var>0 else '#EF4444' if var<0 else '#9CA3AF'
+                    html += f"<tr><td style='padding:6px 8px;'>{month_label}</td><td style='text-align:right;padding:6px 8px;'>{p1:,.2f}</td><td style='text-align:right;padding:6px 8px;'>{p2:,.2f}</td><td style='text-align:right;padding:6px 8px;'><span style='color:{color}; font-weight:700;'>{sign}</span></td></tr>"
+                html += '</table>'
+
+                # Añadir estadísticas generales si hay datos
+                if all_numeric:
+                    minimo = min(all_numeric)
+                    maximo = max(all_numeric)
+                    promedio = sum(all_numeric) / len(all_numeric)
+                    try:
+                        variacion = ((maximo - minimo) / minimo * 100)
+                    except ZeroDivisionError:
+                        variacion = 0.0
+                    sign_variacion = f"{variacion:+.2f}%"
+                    if variacion > 0:
+                        color = "#10B981"
+                        bg = "rgba(16,185,129,0.08)"
+                    elif variacion < 0:
+                        color = "#EF4444"
+                        bg = "rgba(239,68,68,0.08)"
+                    else:
+                        color = "#9CA3AF"
+                        bg = "transparent"
+                    html += '<div style="margin-top:12px;">'
+                    html += '<b>Estadísticas generales del período:</b><br>'
+                    html += f'&nbsp;&nbsp;Mínimo: {minimo:,.2f} Bs<br>'
+                    html += f'&nbsp;&nbsp;Máximo: {maximo:,.2f} Bs<br>'
+                    html += f'&nbsp;&nbsp;Promedio: {promedio:,.2f} Bs<br>'
+                    html += f'&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:3px 8px; border-radius:4px;\">{sign_variacion}</span><br>'
+                    html += '</div>'
+
+                html += '</div>'
+                self.history_text.setHtml(html)
+
+            else:
+                self.history_text.setPlainText('Modo no soportado')
+
         except Exception as e:
             self.history_text.setText(f"Error: {e}")
     
