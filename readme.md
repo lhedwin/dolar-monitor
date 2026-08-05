@@ -20,11 +20,14 @@ El agente de bandeja (dolar_monitor_agent.py) permite recolectar datos cada 10 m
 /home/lhedwin/Programacion/Git/Zinli/
 ├── desktop_app.py                 # Aplicación principal (GUI)
 ├── dolar_monitor_agent.py         # Agente de bandeja (tray) que recolecta datos periódicamente
-├── readme.md                      # Este archivo
+├── readme.md                      # Este archivo (documentación de instalación y uso)
 ├── config.yaml                    # Configuración (opcional)
-├── zinli_monitor.db               # Base de datos SQLite (datos históricos)
+├── zinli_monitor.db               # Base de datos SQLite (datos históricos) — generar con scripts/init_db.py
+├── scripts/                       # Scripts auxiliares (init DB, actualización BCV)
+│   ├── init_db.py                 # Wrapper para crear ./zinli_monitor.db (usar al configurar por primera vez)
+│   └── update_bcv_db.py           # Descarga history.json de BCV y vuelca registros únicos a la BD local
 └── src/
-    ├── database.py                # Gestor de la base de datos
+    ├── database.py                # Gestor de la base de datos (leer/escribir históricos)
     ├── config_manager.py          # Cargador de configuración
     ├── providers/                 # Proveedores: BCV, Binance P2P, Syklo
     └── utils.py                   # Utilidades varias
@@ -69,21 +72,37 @@ Nota: el agente guarda datos en `zinli_monitor.db` y actualiza el menú de la ba
 
 Nota: el archivo de base de datos no se versiona en el repositorio (está en `.gitignore`). Para facilitar que otros usuarios arranquen la app sin un `.db` real, se incluye un script de inicialización.
 
-Crear la base de datos y agregar datos de ejemplo:
+Crear la base de datos y agregar datos de ejemplo (recomendado usar el wrapper en scripts):
 
 ```bash
-# Crea ./zinli_monitor.db con 8 filas de ejemplo por tabla (por defecto)
-python3 init_db.py --path ./zinli_monitor.db
+# Crear ./zinli_monitor.db en la raíz del proyecto con 8 filas de ejemplo
+python3 scripts/init_db.py --sample-size 8
 
-# Especificar distinto tamaño de semilla
-python3 init_db.py --path ./zinli_monitor.db --sample-size 16
+# Crear sin datos de ejemplo
+python3 scripts/init_db.py --no-sample
 
-# Forzar sobrescritura (se crea respaldo .bak)
-python3 init_db.py --path ./zinli_monitor.db --force
+# Forzar sobrescritura (se hace backup) y crear con semilla
+python3 scripts/init_db.py --force --sample-size 16
 
-# Crear solo esquema sin datos de ejemplo
-python3 init_db.py --no-sample
+# Alternativamente (script raíz disponible):
+python3 init_db.py --path ./zinli_monitor.db --sample-size 8
 ```
+
+Mantener actualizada la base de datos BCV (opcional pero recomendado):
+
+```bash
+# Actualiza la tabla bcv_rates descargando history.json y volcando registros únicos
+python3 scripts/update_bcv_db.py
+
+# Recomendación: añadir como paso en la configuración inicial o programarlo con cron
+# Ejemplo cron (ejecutar diariamente a las 03:00):
+# 0 3 * * * /usr/bin/python3 /ruta/al/proyecto/scripts/update_bcv_db.py >> /var/log/update_bcv_db.log 2>&1
+```
+
+Notas:
+- `scripts/init_db.py` crea la base de datos en la raíz (./zinli_monitor.db) por defecto.
+- `scripts/update_bcv_db.py` vuelca el historial disponible desde la API de BCV a la tabla `bcv_rates` y evita duplicados por fecha.
+- Ambos scripts están en `scripts/` y esta carpeta se incluye en el repositorio para facilitar la configuración inicial.
 
 Consultas útiles:
 
