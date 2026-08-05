@@ -49,9 +49,14 @@ class BinanceP2PProvider:
         trade_type: str = "BUY",
         limit: int = 20,
         payment_method: Optional[str] = None,
-        filter_merchant: bool = True
+        filter_merchant: bool = True,
+        trans_amount: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Obtiene anuncios de Binance P2P"""
+        """Obtiene anuncios de Binance P2P
+
+        trans_amount: cuando se especifica, se envía en el payload como transAmount
+        para que la API filtre anuncios que aceptan esa cantidad.
+        """
         
         payload: Dict[str, Any] = {
             "asset": "USDT",
@@ -60,8 +65,8 @@ class BinanceP2PProvider:
             "page": 1,
             "rows": limit,
             "payTypes": [payment_method] if payment_method else [],
-            "publisherType": None,
-            "transAmount": "",
+            "publisherType": "merchant" if filter_merchant else None,
+            "transAmount": str(trans_amount) if trans_amount is not None else "",
         }
         
         headers = {
@@ -138,7 +143,11 @@ class BinanceP2PProvider:
         limit: int = 20,
         filter_merchant: bool = True
     ) -> Dict[str, Any]:
-        """Obtiene resumen de precios para un par de monedas"""
+        """Obtiene resumen de precios para un par de monedas
+
+        Ahora devuelve también 'filter_applied' y 'trans_amount' para exponer el
+        comportamiento de filtrado a capas superiores.
+        """
         
         buy_ads_data = self.get_ads(
             fiat=fiat,
@@ -158,19 +167,66 @@ class BinanceP2PProvider:
         )
         sell_ads = self.parse_ads(sell_ads_data, "SELL", filter_merchant)
         
+        # Nueva lógica: consulta preliminar para obtener una tasa de referencia y usar transAmount
+        filter_applied = False
+        filtered_buy_ads = []
+        filtered_sell_ads = []
+        trans_amount = None
+
+        try:
+            # Intentar obtener precio de referencia consultando merchants rápido
+            ref_data = self.get_ads(fiat=fiat, trade_type="BUY", limit=5, payment_method=payment_method, filter_merchant=True)
+            current_rate = None
+            if isinstance(ref_data, dict) and ref_data.get("data"):
+                try:
+                    current_rate = float(ref_data["data"][0]["adv"]["price"])
+                except Exception:
+                    current_rate = None
+
+            # Si obtenemos current_rate, pedir anuncios que acepten transAmount = current_rate * 10
+            if current_rate:
+                trans_amount = str(int(current_rate * 10))
+                # Call API with transAmount to get merchant ads that accept that exact amount
+                buy_with_amount = self.get_ads(fiat=fiat, trade_type="BUY", limit=limit, payment_method=payment_method, filter_merchant=True, trans_amount=trans_amount)
+                sell_with_amount = self.get_ads(fiat=fiat, trade_type="SELL", limit=limit, payment_method=payment_method, filter_merchant=True, trans_amount=trans_amount)
+
+                # Parse the responses (merchant-only)
+                filtered_buy_ads = self.parse_ads(buy_with_amount, "BUY", True) if buy_with_amount else []
+                filtered_sell_ads = self.parse_ads(sell_with_amount, "SELL", True) if sell_with_amount else []
+
+                # If filtering produced no merchant ads for a side, fallback to the original merchant lists (without transAmount)
+                if not filtered_buy_ads:
+                    filtered_buy_ads = buy_ads
+                if not filtered_sell_ads:
+                    filtered_sell_ads = sell_ads
+
+                if filtered_buy_ads or filtered_sell_ads:
+                    filter_applied = True
+            else:
+                # Fallback: use existing parsed lists
+                filtered_buy_ads = buy_ads
+                filtered_sell_ads = sell_ads
+        except Exception:
+            filtered_buy_ads = buy_ads
+            filtered_sell_ads = sell_ads
+
         self.last_update = datetime.now()
         
         return {
             "timestamp": self.last_update.isoformat(),
             "fiat": fiat,
             "payment_method": payment_method,
+            "filter_applied": filter_applied,
+            "trans_amount": trans_amount,
             "buy": {
-                "stats": self.calculate_stats(buy_ads),
-                "top_ads": buy_ads[:5] if buy_ads else [],
+                "stats": self.calculate_stats(filtered_buy_ads),
+                "top_ads": filtered_buy_ads[:5] if filtered_buy_ads else [],
+            "all_ads": filtered_buy_ads,
             },
             "sell": {
-                "stats": self.calculate_stats(sell_ads),
-                "top_ads": sell_ads[:5] if sell_ads else [],
+            "stats": self.calculate_stats(filtered_sell_ads),
+            "top_ads": filtered_sell_ads[:5] if filtered_sell_ads else [],
+            "all_ads": filtered_sell_ads,
             },
         }
     
@@ -190,6 +246,8 @@ class BinanceP2PProvider:
             "source": "Binance P2P",
             "pair": "USDT/VES",
             "timestamp": summary.get("timestamp"),
+            "filter_applied": summary.get("filter_applied"),
+            "trans_amount": summary.get("trans_amount"),
             "buy_stats": summary["buy"]["stats"],
             "sell_stats": summary["sell"]["stats"],
             "top_buy_ads": summary["buy"]["top_ads"],
@@ -210,15 +268,32 @@ class BinanceP2PProvider:
             limit=limit,
             filter_merchant=filter_merchant
         )
+
+        # Aplicar filtro adicional: solo anuncios cuyo min_amount >= 10 USD (merchant-only already garantizado por filter_merchant)
+        MIN_USD = 10.0
+        buy_all = summary["buy"].get("all_ads", [])
+        sell_all = summary["sell"].get("all_ads", [])
+
+        # Filtrar por min_amount
+        filtered_buy = [ad for ad in buy_all if ad.get("min_amount", 0) >= MIN_USD]
+        filtered_sell = [ad for ad in sell_all if ad.get("min_amount", 0) >= MIN_USD]
+
+        # Recalcular estadísticas y top_ads basadas en el filtrado por mínimo
+        buy_stats = self.calculate_stats(filtered_buy) if filtered_buy else {"error": "No ads available"}
+        sell_stats = self.calculate_stats(filtered_sell) if filtered_sell else {"error": "No ads available"}
+
         return {
             "source": "Binance P2P",
             "pair": "USDT/USD",
             "payment_method": "zinli",
             "timestamp": summary.get("timestamp"),
-            "buy_stats": summary["buy"]["stats"],
-            "sell_stats": summary["sell"]["stats"],
-            "top_buy_ads": summary["buy"]["top_ads"],
-            "top_sell_ads": summary["sell"]["top_ads"],
+            "filter_applied": summary.get("filter_applied"),
+            "trans_amount": summary.get("trans_amount"),
+            "min_usd_filter": MIN_USD,
+            "buy_stats": buy_stats,
+            "sell_stats": sell_stats,
+            "top_buy_ads": filtered_buy[:5],
+            "top_sell_ads": filtered_sell[:5],
         }
     
     def formatear_salida(self, info: Dict) -> str:

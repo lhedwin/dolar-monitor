@@ -210,21 +210,36 @@ class ZinliMonitor:
         if isinstance(syklo_ves, dict) and isinstance(binance_ves, dict):
             syklo_orders = syklo_ves.get("orders", [])
             if syklo_orders:
-                syklo_avg = sum([float(o.get("price", 0)) for o in syklo_orders if o.get("price") != "-"]) / len(syklo_orders)
-                ves_sell_avg = binance_ves.get("sell_stats", {}).get("avg_price")
+                # Compute syklo_avg excluding orders with min>5 and max<20
+                def include_order_for_avg(o):
+                    try:
+                        min_v = float(o.get("min", "-")) if o.get("min", "-") not in (None, "-") else None
+                    except Exception:
+                        min_v = None
+                    try:
+                        max_v = float(o.get("max", "-")) if o.get("max", "-") not in (None, "-") else None
+                    except Exception:
+                        max_v = None
+                    if (min_v is not None) and (max_v is not None) and (min_v > 5) and (max_v < 20):
+                        return False
+                    return True
+
+                prices = [float(o.get("price", 0)) for o in syklo_orders if o.get("price") != "-" and include_order_for_avg(o)]
+            syklo_avg = (sum(prices) / len(prices)) if prices else None
+            ves_sell_avg = binance_ves.get("sell_stats", {}).get("avg_price")
                 
-                if syklo_avg and ves_sell_avg:
-                    syklo_spread = ((syklo_avg - ves_sell_avg) / ves_sell_avg) * 100
+            if syklo_avg and ves_sell_avg:
+                syklo_spread = ((syklo_avg - ves_sell_avg) / ves_sell_avg) * 100
                     
-                    if abs(syklo_spread) > 3:
-                        opportunities.append({
-                            "type": "syklo_vs_binance_ves",
-                            "description": f"Diferencia entre Syklo ({syklo_avg:.2f}) y Binance P2P Sell ({ves_sell_avg:.2f})",
-                            "spread_percent": syklo_spread,
-                            "syklo_avg": syklo_avg,
-                            "binance_sell": ves_sell_avg,
-                            "recommendation": "use_syklo" if syklo_spread < 0 else "use_binance",
-                        })
+                if abs(syklo_spread) > 3:
+                    opportunities.append({
+                        "type": "syklo_vs_binance_ves",
+                        "description": f"Diferencia entre Syklo ({syklo_avg:.2f}) y Binance P2P Sell ({ves_sell_avg:.2f})",
+                        "spread_percent": syklo_spread,
+                        "syklo_avg": syklo_avg,
+                        "binance_sell": ves_sell_avg,
+                        "recommendation": "use_syklo" if syklo_spread < 0 else "use_binance",
+                    })
         
         return {
             "timestamp": data.get("timestamp"),

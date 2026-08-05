@@ -173,6 +173,24 @@ class SykloProvider:
         filtered_orders = self.filter_orders(orders, send_methods)
         filtered_orders.sort(key=lambda x: float(x.get("price", 0) if x.get("price") != "-" else 0), reverse=True)
         
+        # Calcular promedio de precios excluyendo órdenes cuya min > 5 y max < 20
+        def include_order_for_avg(o):
+            try:
+                min_v = float(o.get("min", "-")) if o.get("min", "-") not in (None, "-") else None
+            except Exception:
+                min_v = None
+            try:
+                max_v = float(o.get("max", "-")) if o.get("max", "-") not in (None, "-") else None
+            except Exception:
+                max_v = None
+            # Excluir si min_v existe y max_v exists and min_v >5 and max_v <20
+            if (min_v is not None) and (max_v is not None) and (min_v > 5) and (max_v < 20):
+                return False
+            return True
+
+        prices_for_avg = [float(o.get("price")) for o in filtered_orders if o.get("price") != "-" and include_order_for_avg(o)]
+        avg_price = (sum(prices_for_avg) / len(prices_for_avg)) if prices_for_avg else None
+        
         self.last_update = datetime.now()
         
         return {
@@ -182,6 +200,7 @@ class SykloProvider:
             "timestamp": self.last_update.isoformat(),
             "orders": filtered_orders[:20],
             "total_orders": len(filtered_orders),
+            "avg_price": avg_price,
         }
     
     def get_usdc_usd_info(self) -> Dict:

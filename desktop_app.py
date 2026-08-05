@@ -660,10 +660,27 @@ class ZinliMonitorDesktopApp(QWidget):
             if "error" not in syklo_ves:
                 orders = syklo_ves.get("orders", [])
                 if orders and len(orders) > 0:
-                    best_rate = orders[0].get("price", "--")
-                    if best_rate != "--":
-                        best_rate = float(best_rate)
-                        self.syklo_ves_card.update_value(f"{best_rate:.3f} Bs")
+                    # Prefer avg_price returned by provider; fallback to computing average excluding small-range orders
+                    best_rate = syklo_ves.get("avg_price") if syklo_ves.get("avg_price") is not None else None
+                    if best_rate is None:
+                        # compute with same rule: exclude orders with min>5 and max<20
+                        def include_order_for_avg(o):
+                            try:
+                                min_v = float(o.get("min", "-")) if o.get("min", "-") not in (None, "-") else None
+                            except Exception:
+                                min_v = None
+                            try:
+                                max_v = float(o.get("max", "-")) if o.get("max", "-") not in (None, "-") else None
+                            except Exception:
+                                max_v = None
+                            if (min_v is not None) and (max_v is not None) and (min_v > 5) and (max_v < 20):
+                                return False
+                            return True
+                        prices = [float(o.get("price")) for o in orders if o.get("price") != "-" and include_order_for_avg(o)]
+                        best_rate = (sum(prices) / len(prices)) if prices else None
+
+                    if best_rate is not None:
+                        self.syklo_ves_card.update_value(f"{best_rate:.2f} Bs")
                     else:
                         self.syklo_ves_card.update_value("--")
                 else:

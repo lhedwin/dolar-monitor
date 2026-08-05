@@ -62,3 +62,6 @@ config.local.yaml
 # Coverage
 .coverage
 
+
+# Ignore local test scripts
+pruebas/
