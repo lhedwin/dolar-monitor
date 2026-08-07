@@ -31,83 +31,119 @@ class DatabaseManager:
         self._initialize_database()
     
     def _get_connection(self) -> sqlite3.Connection:
-        """Obtiene una conexión a la base de datos"""
-        conn = sqlite3.connect(self.db_path)
+        """Obtiene una conexión a la base de datos (timeout y WAL para concurrencia)"""
+        # timeout: tiempo máximo (s) que espera SQLite si la DB está bloqueada
+        # check_same_thread=False para permitir uso en hilos si se comparte (agente/background)
+        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row  # Para acceder por nombre de columna
+        # Activar pragmas recomendados para concurrencia y resiliencia
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA wal_autocheckpoint=1000;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=30000;")
+        except Exception:
+            # Si algo falla, no romper la inicialización; la DB seguirá usable
+            pass
         return conn
     
     def _initialize_database(self) -> None:
-        """Inicializa las tablas de la base de datos"""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        # Tabla de tasas BCV
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS bcv_rates (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                date TEXT NOT NULL,
-                rate REAL NOT NULL,
-                source TEXT DEFAULT 'BCV',
-                raw_data TEXT
-            )
-        """)
-        
-        # Tabla de precios Binance P2P
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS binance_p2p_prices (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                pair TEXT NOT NULL,
-                side TEXT NOT NULL,
-                payment_method TEXT,
-                count INTEGER,
-                min_price REAL,
-                max_price REAL,
-                avg_price REAL,
-                median_price REAL,
-                top_ads TEXT,
-                raw_data TEXT
-            )
-        """)
-        
-        # Tabla de orderbook Syklo
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS syklo_orderbook (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                pair TEXT NOT NULL,
-                description TEXT,
-                total_orders INTEGER,
-                orders TEXT,
-                raw_data TEXT
-            )
-        """)
-        
-        # Tabla de datos consolidados (para análisis)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS consolidated_data (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                bcv_rate REAL,
-                binance_ves_buy_avg REAL,
-                binance_ves_sell_avg REAL,
-                binance_usd_zinli_buy_avg REAL,
-                binance_usd_zinli_sell_avg REAL,
-                syklo_ves_usdc_avg REAL,
-                syklo_usdc_usd_avg REAL,
-                metadata TEXT
-            )
-        """)
-        
-        # Índices para consultas rápidas
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_bcv_timestamp ON bcv_rates(timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_binance_timestamp ON binance_p2p_prices(timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_syklo_timestamp ON syklo_orderbook(timestamp)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_consolidated_timestamp ON consolidated_data(timestamp)")
-        
-        conn.commit()
-        conn.close()
+        """Inicializa las tablas de la base de datos
+
+        Implementa reintentos cuando la base de datos está bloqueada por el agente en background.
+        Esto evita fallos de arranque si el agente mantiene transacciones cortas abiertas.
+        """
+        max_attempts = 6
+        delay = 0.5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                # Asegurar modo WAL para permitir lectores concurrentes mientras el agente escribe
+                try:
+                    cursor.execute("PRAGMA journal_mode=WAL;")
+                    cursor.execute("PRAGMA busy_timeout=30000;")
+                except Exception:
+                    pass
+
+                # Tabla de tasas BCV
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS bcv_rates (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        date TEXT NOT NULL,
+                        rate REAL NOT NULL,
+                        source TEXT DEFAULT 'BCV',
+                        raw_data TEXT
+                    )
+                """)
+
+                # Tabla de precios Binance P2P
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS binance_p2p_prices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        pair TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        payment_method TEXT,
+                        count INTEGER,
+                        min_price REAL,
+                        max_price REAL,
+                        avg_price REAL,
+                        median_price REAL,
+                        top_ads TEXT,
+                        raw_data TEXT
+                    )
+                """)
+
+                # Tabla de orderbook Syklo
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS syklo_orderbook (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        pair TEXT NOT NULL,
+                        description TEXT,
+                        total_orders INTEGER,
+                        orders TEXT,
+                        raw_data TEXT
+                    )
+                """)
+
+                # Tabla de datos consolidados (para análisis)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS consolidated_data (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        bcv_rate REAL,
+                        binance_ves_buy_avg REAL,
+                        binance_ves_sell_avg REAL,
+                        binance_usd_zinli_buy_avg REAL,
+                        binance_usd_zinli_sell_avg REAL,
+                        syklo_ves_usdc_avg REAL,
+                        syklo_usdc_usd_avg REAL,
+                        metadata TEXT
+                    )
+                """)
+
+                # Índices para consultas rápidas
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_bcv_timestamp ON bcv_rates(timestamp)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_binance_timestamp ON binance_p2p_prices(timestamp)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_syklo_timestamp ON syklo_orderbook(timestamp)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_consolidated_timestamp ON consolidated_data(timestamp)")
+
+                conn.commit()
+                conn.close()
+                return
+
+            except sqlite3.OperationalError as e:
+                # Si la BD está bloqueada, esperar y reintentar
+                if 'locked' in str(e).lower() and attempt < max_attempts:
+                    time.sleep(delay)
+                    delay = min(5.0, delay * 2)
+                    continue
+                # Si es otro error o agotaron intentos, volver a lanzar
+                raise
+
     
     def save_bcv_rate(self, rate_data: Dict) -> bool:
         """
@@ -298,11 +334,11 @@ class DatabaseManager:
     
     def get_bcv_history(self, hours: int = 24) -> List[Dict]:
         """
-        Obtiene historial de tasas BCV
-        
+        Obtiene historial de tasas BCV por las últimas N horas
+
         Args:
             hours: Número de horas de historial
-            
+
         Returns:
             Lista de diccionarios con datos históricos
         """
@@ -315,7 +351,7 @@ class DatabaseManager:
             cursor.execute("""
                 SELECT * FROM bcv_rates 
                 WHERE timestamp >= ? 
-                ORDER BY timestamp DESC
+                ORDER BY date ASC
             """, (since.isoformat(),))
             
             rows = cursor.fetchall()
@@ -325,6 +361,51 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting BCV history: {e}")
             return []
+
+    def get_bcv_history_by_date(self, start_date: str, end_date: str) -> Dict:
+        """
+        Obtiene historial de tasas BCV filtrando por rango de fechas (YYYY-MM-DD)
+
+        Args:
+            start_date: Fecha inicial en formato 'YYYY-MM-DD'
+            end_date: Fecha final en formato 'YYYY-MM-DD'
+
+        Returns:
+            Diccionario con keys: source, start_date, end_date, rates (list), count, timestamp
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT raw_data FROM bcv_rates
+                WHERE date >= ? AND date <= ?
+                ORDER BY date ASC
+            """, (start_date, end_date))
+            rows = cursor.fetchall()
+            conn.close()
+
+            rates = []
+            for r in rows:
+                raw = r['raw_data']
+                try:
+                    parsed = json.loads(raw)
+                    rates.append(parsed)
+                except Exception:
+                    # fallback: try to build minimal dict
+                    rates.append({'date': None, 'dollar': None, 'USD': None})
+
+            return {
+                'source': 'BCV (local DB)',
+                'start_date': start_date,
+                'end_date': end_date,
+                'rates': rates,
+                'count': len(rates),
+                'timestamp': datetime.now().isoformat()
+            }
+        except Exception as e:
+            print(f"Error getting BCV history by date: {e}")
+            return {'error': str(e)}
     
     def get_binance_history(self, pair: str, hours: int = 24) -> List[Dict]:
         """

@@ -232,61 +232,105 @@ class BCVProvider:
     
     def get_historical_rates(self, days: int = 30, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Union[Dict, str]:
         """
-        Obtiene tasas históricas del BCV con múltiples fallbacks
-        
-        Args:
-            days: Número de días de historial (solo si no se especifican fechas)
-            start_date: Fecha inicial en formato YYYY-MM-DD (opcional)
-            end_date: Fecha final en formato YYYY-MM-DD (opcional)
-            
-        Returns:
-            Diccionario con historial de tasas o mensaje de error
+        Obtiene tasas históricas del BCV.
+
+        Estrategia:
+        1. Intentar usar la base de datos local (si existe) para el rango solicitado.
+        2. Si no hay datos suficientes, consultar la API de BCV Today y actualizar la DB local.
+        3. Si la API falla, caer a datos simulados como último recurso.
         """
-        # Intento 1: BCV Today API (tiene histórico completo desde 2021)
+        # Determinar rango de fechas
+        from datetime import datetime, timedelta
+        if start_date and end_date:
+            start = start_date
+            end = end_date
+        else:
+            end = datetime.now().strftime("%Y-%m-%d")
+            start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+        # Intentar leer desde la BD local primero
+        try:
+            try:
+                # Import local DatabaseManager
+                from database import DatabaseManager
+            except Exception:
+                from src.database import DatabaseManager
+
+            db = DatabaseManager()
+            local = db.get_bcv_history_by_date(start, end)
+            if isinstance(local, dict) and local.get('count', 0) > 0:
+                # Si la BD tiene entradas para el rango, devolverlas
+                return local
+        except Exception as e:
+            # Si falla el acceso a DB, seguimos y consultamos API
+            print(f"Warning: no se pudo leer BD local: {e}")
+
+        # Si no hay datos locales, consultar la API BCV Today
         try:
             url = "https://bcv.today/api/v1/history.json"
             response = requests.get(url, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
-            
+
             if isinstance(data, list) and len(data) > 0:
-                # Filtrar por rango de fechas si se especifica
-                if start_date and end_date:
-                    filtered_data = [
-                        item for item in data 
-                        if start_date <= item.get("date", "") <= end_date
-                    ]
-                    return {
-                        "source": "BCV (BCV Today API - Historical)",
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "rates": filtered_data,
-                        "count": len(filtered_data),
-                        "timestamp": datetime.now().isoformat()
-                    }
-                else:
-                    # Por defecto, últimos N días
-                    from datetime import datetime, timedelta
-                    end_date = datetime.now().strftime("%Y-%m-%d")
-                    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-                    
-                    filtered_data = [
-                        item for item in data 
-                        if start_date <= item.get("date", "") <= end_date
-                    ]
-                    
-                    return {
-                        "source": "BCV (BCV Today API - Historical)",
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "rates": filtered_data,
-                        "count": len(filtered_data),
-                        "timestamp": datetime.now().isoformat()
-                    }
-                
+                # Filtrar por rango
+                filtered_data = [item for item in data if start <= item.get("date", "") <= end]
+
+                # Actualizar BD local con nuevos registros (evitar duplicados)
+                try:
+                    try:
+                        from database import DatabaseManager
+                    except Exception:
+                        from src.database import DatabaseManager
+
+                    db = DatabaseManager()
+                    conn = db._get_connection()
+                    cursor = conn.cursor()
+                    import json
+                    inserted = 0
+                    for item in filtered_data:
+                        date = item.get('date')
+                        if not date:
+                            continue
+                        # determine rate value
+                        rate_val = None
+                        for k in ('USD','dollar','rate'):
+                            if k in item and item.get(k) is not None:
+                                try:
+                                    rate_val = float(item.get(k))
+                                    break
+                                except Exception:
+                                    continue
+                        if rate_val is None:
+                            continue
+                        cursor.execute('SELECT 1 FROM bcv_rates WHERE date = ?', (date,))
+                        if cursor.fetchone():
+                            continue
+                        cursor.execute("INSERT INTO bcv_rates (date, rate, source, raw_data) VALUES (?, ?, ?, ?)", (
+                            date,
+                            rate_val,
+                            item.get('source', 'BCV (history.json)'),
+                            json.dumps(item, ensure_ascii=False)
+                        ))
+                        inserted += 1
+                    if inserted:
+                        conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"Warning: no se pudo actualizar BD local: {e}")
+
+                return {
+                    "source": "BCV (BCV Today API - Historical)",
+                    "start_date": start,
+                    "end_date": end,
+                    "rates": filtered_data,
+                    "count": len(filtered_data),
+                    "timestamp": datetime.now().isoformat()
+                }
+
         except Exception as e:
             print(f"Error con historial BCV Today: {e}")
-            # Intento 2: Fallback a datos simulados
+            # Intento fallback a datos simulados
             return self._generate_mock_historical_rates(days, start_date, end_date)
     
     def _generate_mock_historical_rates(self, days: int = 30, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict:

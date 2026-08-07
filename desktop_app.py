@@ -11,9 +11,9 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QGridLayout, QTabWidget, QMessageBox,
-    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit
+    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit, QProgressDialog
 )
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate
+from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate, QThread, QObject
 from PyQt6.QtGui import QFont
 
 # Agregar ruta del src al path
@@ -22,12 +22,39 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from zinli_monitor import ZinliMonitor
 
 
+class DataLoaderWorker(QObject):
+    """Worker para cargar datos en un hilo separado"""
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    
+    def __init__(self, monitor):
+        super().__init__()
+        self.monitor = monitor
+    
+    def run(self):
+        """Carga los datos en el hilo separado"""
+        try:
+            data = self.monitor.get_all_data(save_to_db=True)
+            self.finished.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ZinliMonitorDesktopApp(QWidget):
     """Aplicación principal de escritorio usando QWidget como el ejemplo"""
     
     def __init__(self):
         super().__init__()
         self.monitor = ZinliMonitor()
+        
+        # Diálogo de carga
+        self.loading_dialog = QProgressDialog("Cargando registros...", None, 0, 0, self)
+        self.loading_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.loading_dialog.setCancelButton(None)
+        self.loading_dialog.setAutoClose(False)
+        self.loading_dialog.setWindowTitle("")
+        self.loading_dialog.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        
         self.init_ui()
         
     def init_ui(self):
@@ -178,8 +205,122 @@ class ZinliMonitorDesktopApp(QWidget):
 
         self.setLayout(layout_principal)
         
-        # Cargar datos iniciales
-        QTimer.singleShot(1000, self.refresh_dashboard)
+        # Cargar datos iniciales con un pequeño delay para asegurar que la ventana esté visible
+        QTimer.singleShot(100, self.show_loading_dialog)
+    
+    def show_loading_dialog(self):
+        """Muestra el diálogo de carga y carga los datos en un hilo separado"""
+        # Usar un método diferente para asegurar que aparezca en primer plano
+        self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.loading_dialog.show()
+        self.loading_dialog.raise_()
+        self.loading_dialog.activateWindow()
+        # Procesar eventos para asegurar que se muestre
+        QApplication.processEvents()
+        
+        # Crear worker y thread para cargar datos en background
+        self.data_thread = QThread()
+        self.data_worker = DataLoaderWorker(self.monitor)
+        self.data_worker.moveToThread(self.data_thread)
+        
+        # Conectar señales
+        self.data_thread.started.connect(self.data_worker.run)
+        self.data_worker.finished.connect(self.on_data_loaded)
+        self.data_worker.error.connect(self.on_data_error)
+        self.data_worker.finished.connect(self.data_thread.quit)
+        self.data_thread.finished.connect(self.data_thread.deleteLater)
+        
+        # Iniciar el thread
+        self.data_thread.start()
+    
+    def on_data_loaded(self, data):
+        """Callback cuando los datos se cargan exitosamente"""
+        try:
+            # BCV
+            bcv_data = data.get("bcv", {})
+            if "error" not in bcv_data:
+                bcv_rate = bcv_data.get("rate", "--")
+                if bcv_rate != "--":
+                    bcv_rate = float(bcv_rate)
+                    euro_rate = bcv_rate * 1.08
+                    self.bcv_card.update_value(f"${bcv_rate:.2f} Bs\n€{euro_rate:.2f} Bs")
+                else:
+                    self.bcv_card.update_value("--")
+                self.bcv_card.update_subtitle(bcv_data.get("date", "--"))
+            else:
+                self.bcv_card.update_value("Error")
+            
+            # Binance VES
+            ves_data = data.get("binance_ves", {})
+            if "error" not in ves_data:
+                buy_avg = ves_data.get("buy_stats", {}).get("avg_price", "--")
+                sell_avg = ves_data.get("sell_stats", {}).get("avg_price", "--")
+                if buy_avg != "--" and sell_avg != "--":
+                    buy_avg = float(buy_avg)
+                    sell_avg = float(sell_avg)
+                    self.binance_ves_card.update_value(f"Buy: {buy_avg:.2f}\nSell: {sell_avg:.2f}")
+                else:
+                    self.binance_ves_card.update_value("--")
+            else:
+                self.binance_ves_card.update_value("Error")
+            
+            # Binance USD (Zinli)
+            usd_data = data.get("binance_usd_zinli", {})
+            if "error" not in usd_data:
+                buy_avg = usd_data.get("buy_stats", {}).get("avg_price", "--")
+                sell_avg = usd_data.get("sell_stats", {}).get("avg_price", "--")
+                if buy_avg != "--" and sell_avg != "--":
+                    buy_avg = float(buy_avg)
+                    sell_avg = float(sell_avg)
+                    self.binance_usd_card.update_value(f"Buy: ${buy_avg:.3f}\nSell: ${sell_avg:.3f}")
+                else:
+                    self.binance_usd_card.update_value("--")
+            else:
+                self.binance_usd_card.update_value("Error")
+            
+            # Syklo VES/USDC
+            syklo_ves = data.get("syklo_ves_usdc", {})
+            if "error" not in syklo_ves:
+                orders = syklo_ves.get("orders", [])
+                if orders and len(orders) > 0:
+                    best_rate = orders[0].get("price", "--")
+                    if best_rate != "--":
+                        best_rate = float(best_rate)
+                        self.syklo_ves_card.update_value(f"{best_rate:.2f} Bs")
+                    else:
+                        self.syklo_ves_card.update_value("--")
+                else:
+                    self.syklo_ves_card.update_value("--")
+            else:
+                self.syklo_ves_card.update_value("Error")
+            
+            # Syklo USDC/USD
+            syklo_usd = data.get("syklo_usdc_usd", {})
+            if "error" not in syklo_usd:
+                orders = syklo_usd.get("orders", [])
+                if orders and len(orders) > 0:
+                    best_rate = orders[0].get("price", "--")
+                    if best_rate != "--":
+                        best_rate = float(best_rate)
+                        self.syklo_usd_card.update_value(f"${best_rate:.4f}")
+                    else:
+                        self.syklo_usd_card.update_value("--")
+                else:
+                    self.syklo_usd_card.update_value("--")
+            else:
+                self.syklo_usd_card.update_value("Error")
+            
+            # Cerrar diálogo de carga
+            self.loading_dialog.close()
+            
+        except Exception as e:
+            self.loading_dialog.close()
+            QMessageBox.critical(self, "Error", f"Error actualizando datos: {e}")
+    
+    def on_data_error(self, error_msg):
+        """Callback cuando hay un error cargando datos"""
+        self.loading_dialog.close()
+        QMessageBox.critical(self, "Error", f"Error cargando datos: {error_msg}")
     
     def setup_dashboard(self):
         """Configura el dashboard usando QFrame como el ejemplo"""
@@ -441,17 +582,19 @@ class ZinliMonitorDesktopApp(QWidget):
             self.month_label.setVisible(True)
             self.month_spin.setVisible(True)
             self.year_label.setVisible(True)
+            self.year_spin.setEnabled(True)  # siempre re-habilitar
             self.year_spin.setVisible(True)
         elif mode == "Mes en curso":
-            # mostrar solo año/mes (mes fijado al actual)
+            # mostrar solo año (mes fijado al actual)
             self.month_label.setVisible(False)
             self.month_spin.setVisible(False)
             self.year_label.setVisible(True)
+            self.year_spin.setEnabled(True)  # siempre re-habilitar
             self.year_spin.setVisible(True)
             self.year_spin.setValue(QDate.currentDate().year())
-            self.year_spin.setEnabled(False)
         elif mode == "Año específico":
             self.year_label.setVisible(True)
+            self.year_spin.setEnabled(True)  # siempre re-habilitar
             self.year_spin.setVisible(True)
         elif mode == "Año en curso":
             self.year_label.setVisible(True)
@@ -474,51 +617,103 @@ class ZinliMonitorDesktopApp(QWidget):
                 days = self.days_spinbox.value()
                 history = self.monitor.get_bcv_history(days)
                 if not isinstance(history, dict):
-                    # Muestra el error tal cual provenga del proveedor
                     self.history_text.setPlainText(f"Error obteniendo historial: {history}")
                     return
-                rates = history.get('rates', []) or []
+                raw_rates = history.get('rates', []) or []
                 start_date = history.get('start_date')
                 end_date = history.get('end_date')
-                title = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
 
-                # Reusar visualización previa (bloques horizontales)
+                # Normalizar: construir un único registro por fecha en el rango (más reciente por fecha)
+                from datetime import datetime, timedelta
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                except Exception:
+                    # si no vienen fechas, usar última N fechas encontradas
+                    start_dt = None
+                    end_dt = None
+
+                # Map date -> last entry
+                last_by_date = {}
+                for entry in raw_rates:
+                    d = None
+                    if isinstance(entry, dict):
+                        d = entry.get('date') or entry.get('fecha')
+                    if not d:
+                        continue
+                    last_by_date[d] = entry  # override: keeps last occurrence
+
+                # Build ordered list of dates in range
+                dates = []
+                if start_dt and end_dt:
+                    cur = start_dt
+                    while cur <= end_dt:
+                        dates.append(cur.strftime("%Y-%m-%d"))
+                        cur += timedelta(days=1)
+                else:
+                    # fallback: unique sorted dates present
+                    dates = sorted(last_by_date.keys())
+
+                # Create list of one entry per date (may be missing)
+                rates = []
+                for d in dates:
+                    e = last_by_date.get(d)
+                    if e:
+                        rates.append(e)
+                    else:
+                        rates.append({'date': d, 'USD': None})
+
                 n = len(rates)
                 BLOCK_SIZE = 15
-                text = title
+                title = f"Período: {start_date} a {end_date}\n"
+                title += f"Total registros esperados: {days}\n"
+                title += f"Fuente: {history.get('source')}\n"
+                title += f"Mostrando {n} registros (uno por fecha del rango)\n\n"
+
+                # Si pocos registros, mostrar línea por línea (usar HTML <br> para evitar interlineado)
                 if n == 0:
-                    text += "No hay registros para el período solicitado.\n"
+                    body = "No hay registros para el período solicitado.<br>"
                 elif n <= BLOCK_SIZE:
-                    text += "Registros:\n"
+                    lines = []
                     for i, rate in enumerate(rates, 1):
                         price = self._extract_price(rate)
-                        rate_str = f"{price:.2f}" if price is not None else (rate.get('USD', rate.get('dollar', 'N/A')) if isinstance(rate, dict) else str(rate))
-                        text += f"{i}. {rate.get('date') if isinstance(rate, dict) else 'N/A'}: {rate_str} Bs\n"
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        lines.append(f"{i}. {rate.get('date')}: {rate_str} Bs")
+                    body = "<br>".join(lines) + "<br>"
                 else:
-                    text += f"Mostrando {n} registros.\n\n"
+                    # Renderizar en una tabla HTML con columnas = num_blocks para garantizar alineación
                     num_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
-                    for row in range(BLOCK_SIZE):
-                        row_parts = []
+                    grid = [["" for _ in range(num_blocks)] for _ in range(BLOCK_SIZE)]
+                    for idx, entry in enumerate(rates):
+                        b = idx // BLOCK_SIZE
+                        r = idx % BLOCK_SIZE
+                        price = self._extract_price(entry)
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        grid[r][b] = f"{idx+1}. {entry.get('date')}: {rate_str} Bs"
+
+                    rows_html = []
+                    for r in range(BLOCK_SIZE):
+                        cols_html = []
                         any_in_row = False
-                        for b in range(num_blocks):
-                            idx = b * BLOCK_SIZE + row
-                            if idx < n:
-                                entry = rates[idx]
-                                price = self._extract_price(entry)
-                                rate_str = f"{price:.2f}" if price is not None else (entry.get('USD', entry.get('dollar', 'N/A')) if isinstance(entry, dict) else str(entry))
-                                cell = f"{idx+1}. {entry.get('date') if isinstance(entry, dict) else 'N/A'}: {rate_str}"
+                        for c in range(num_blocks):
+                            cell = grid[r][c]
+                            if cell:
                                 any_in_row = True
+                                cols_html.append(f'<td style="padding:1px 6px; vertical-align:top; font-family: monospace; white-space:nowrap;">{cell}</td>')
                             else:
-                                cell = ""
-                            row_parts.append(cell.ljust(32))
+                                cols_html.append('<td style="padding:1px 6px; vertical-align:top;">&nbsp;</td>')
+                            # separador horizontal entre columnas (excepto tras la última)
+                            if c < num_blocks - 1:
+                                cols_html.append('<td style="width:100px;"></td>')
                         if not any_in_row:
                             break
-                        text += '  '.join(row_parts) + "\n"
-                    text += "\n"
+                        rows_html.append('<tr style="line-height:1.1;">' + ''.join(cols_html) + '</tr>')
 
-                # Estadísticas
+                    body = f'<table style="border-collapse:collapse;">' + ''.join(rows_html) + '</table>'
+
+                # Estadísticas con los valores numéricos disponibles
                 numeric_rates = [self._extract_price(r) for r in rates if self._extract_price(r) is not None]
-                stats_html = ""
+                stats_html = ''
                 if numeric_rates:
                     minimo = min(numeric_rates)
                     maximo = max(numeric_rates)
@@ -527,24 +722,29 @@ class ZinliMonitorDesktopApp(QWidget):
                         variacion = ((maximo - minimo) / minimo * 100)
                     except ZeroDivisionError:
                         variacion = 0.0
-                    sign_variacion = f"{variacion:+.2f}%"
+                    sign_variacion = f'{variacion:+.2f}%'
                     if variacion > 0:
-                        color = "#10B981"
-                        bg = "rgba(16,185,129,0.12)"
+                        color = '#10B981'
+                        bg = 'rgba(16,185,129,0.12)'
                     elif variacion < 0:
-                        color = "#EF4444"
-                        bg = "rgba(239,68,68,0.12)"
+                        color = '#EF4444'
+                        bg = 'rgba(239,68,68,0.12)'
                     else:
-                        color = "#9CA3AF"
-                        bg = "transparent"
-                    stats_html += "<br><b>Estadísticas:</b><br>"
-                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+                        color = '#9CA3AF'
+                        bg = 'transparent'
+                    stats_html = (
+                        '<div style="margin-top:10px; line-height:1.6;">'
+                        '<b>Estadísticas:</b><br>'
+                        f'&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Variación: <span style="color:{color}; font-weight:700; background-color:{bg}; padding:2px 7px; border-radius:4px;">{sign_variacion}</span><br>'
+                        '</div>'
+                    )
 
-                html = f'<div style="font-family: monospace; color: #d1d5db;">'
-                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}</pre>'
+                html = '<div style="color:#d1d5db; font-family: sans-serif; line-height:1.1;">'
+                html += f'<pre style="font-family: monospace; color:#d1d5db; background:transparent; border:none; line-height:1.4;">{title}</pre>'
+                html += body
                 html += stats_html
                 html += '</div>'
 
@@ -574,23 +774,77 @@ class ZinliMonitorDesktopApp(QWidget):
                 if not isinstance(history, dict):
                     self.history_text.setPlainText(f"Error obteniendo historial: {history}")
                     return
-                rates = history.get('rates', []) or []
+                raw_rates = history.get('rates', []) or []
 
-                # Construir listado y estadísticas
-                text = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
-                lines = []
-                numeric_rates = []
-                for i, r in enumerate(rates, 1):
-                    price = self._extract_price(r)
-                    if price is not None:
-                        numeric_rates.append(price)
-                        rate_str = f"{price:.2f}"
-                    else:
-                        rate_str = (r.get('USD', r.get('dollar', 'N/A')) if isinstance(r, dict) else str(r))
-                    lines.append(f"{i}. {r.get('date') if isinstance(r, dict) else 'N/A'}: {rate_str} Bs")
+                # Agrupar por fecha (usar la última entrada por fecha)
+                last_by_date = {}
+                for entry in raw_rates:
+                    if not isinstance(entry, dict):
+                        continue
+                    d = entry.get('date')
+                    if not d:
+                        continue
+                    last_by_date[d] = entry
 
-                # Estadísticas si hay datos numéricos
-                stats_html = ""
+                # Generar lista de fechas del mes
+                from datetime import datetime, timedelta
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                dates = []
+                cur = start_dt
+                while cur <= end_dt:
+                    dates.append(cur.strftime("%Y-%m-%d"))
+                    cur += timedelta(days=1)
+
+                # Construir lista de un registro por fecha (None si faltante)
+                rates = [last_by_date.get(d) or {'date': d, 'USD': None} for d in dates]
+
+                # Render en bloques horizontales (BLOCK_SIZE = 15)
+                n = len(rates)
+                BLOCK_SIZE = 15
+                title_html = f'<div style="color:#d1d5db; font-family: sans-serif;"><b>Período: {start_date} a {end_date}</b><br>Fuente: {history.get("source")}<br>Total fechas: {n} — Registros encontrados: {history.get("count", 0)}<br><br>'
+
+                if n == 0:
+                    body_html = "No hay registros para el período solicitado."
+                elif n <= BLOCK_SIZE:
+                    lines = []
+                    for i, rate in enumerate(rates, 1):
+                        price = self._extract_price(rate)
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        lines.append(f"{i}. {rate.get('date')}: {rate_str} Bs")
+                    body_html = "<br>".join(lines)
+                else:
+                    num_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    grid = [["" for _ in range(num_blocks)] for _ in range(BLOCK_SIZE)]
+                    for idx, entry in enumerate(rates):
+                        b = idx // BLOCK_SIZE
+                        r = idx % BLOCK_SIZE
+                        price = self._extract_price(entry)
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        grid[r][b] = f"{idx+1}. {entry.get('date')}: {rate_str} Bs"
+
+                    rows_html = []
+                    for r in range(BLOCK_SIZE):
+                        cols_html = []
+                        any_in_row = False
+                        for c in range(num_blocks):
+                            cell = grid[r][c]
+                            if cell:
+                                any_in_row = True
+                                cols_html.append(f'<td style="padding:1px 6px; vertical-align:top; font-family: monospace; white-space:nowrap;">{cell}</td>')
+                            else:
+                                cols_html.append('<td style="padding:1px 6px; vertical-align:top;">&nbsp;</td>')
+                            if c < num_blocks - 1:
+                                cols_html.append('<td style="width:24px;"></td>')
+                        if not any_in_row:
+                            break
+                        rows_html.append('<tr style="line-height:1.1;">' + ''.join(cols_html) + '</tr>')
+
+                    body_html = f'Mostrando {n} fechas.<br><table style="border-collapse:collapse;">' + ''.join(rows_html) + '</table>'
+
+                # Estadísticas
+                numeric_rates = [self._extract_price(r) for r in rates if self._extract_price(r) is not None]
+                stats_html = ''
                 if numeric_rates:
                     minimo = min(numeric_rates)
                     maximo = max(numeric_rates)
@@ -599,29 +853,30 @@ class ZinliMonitorDesktopApp(QWidget):
                         variacion = ((maximo - minimo) / minimo * 100)
                     except ZeroDivisionError:
                         variacion = 0.0
-                    sign_variacion = f"{variacion:+.2f}%"
+                    sign_variacion = f'{variacion:+.2f}%'
                     if variacion > 0:
-                        color = "#10B981"
-                        bg = "rgba(16,185,129,0.12)"
+                        color = '#10B981'
+                        bg = 'rgba(16,185,129,0.12)'
                     elif variacion < 0:
-                        color = "#EF4444"
-                        bg = "rgba(239,68,68,0.12)"
+                        color = '#EF4444'
+                        bg = 'rgba(239,68,68,0.12)'
                     else:
-                        color = "#9CA3AF"
-                        bg = "transparent"
-                    stats_html += "<br><b>Estadísticas:</b><br>"
-                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+                        color = '#9CA3AF'
+                        bg = 'transparent'
+                    stats_html = (
+                        '<div style="margin-top:10px; line-height:1.6;">'
+                        '<b>Estadísticas:</b><br>'
+                        f'&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Variación: <span style="color:{color}; font-weight:700; background-color:{bg}; padding:2px 7px; border-radius:4px;">{sign_variacion}</span><br>'
+                        '</div>'
+                    )
 
-                html = f'<div style="font-family: monospace; color: #d1d5db;">'
-                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}'
-                html += "\n".join(lines)
-                html += '</pre>'
-                html += stats_html
-                html += '</div>'
-
+                html = title_html.replace(
+                    '<div style="color:#d1d5db; font-family: sans-serif;">',
+                    '<div style="color:#d1d5db; font-family: sans-serif; line-height:1.1;">'
+                ) + body_html + stats_html + '</div>'
                 self.history_text.setHtml(html)
 
             elif mode == "Mes en curso":
@@ -642,22 +897,76 @@ class ZinliMonitorDesktopApp(QWidget):
                 if not isinstance(history, dict):
                     self.history_text.setPlainText(f"Error obteniendo historial: {history}")
                     return
-                rates = history.get('rates', []) or []
+                raw_rates = history.get('rates', []) or []
 
-                text = f"Período: {start_date} a {end_date}    Total registros: {history.get('count', 0)}\nFuente: {history.get('source')}\n\n"
-                lines = []
-                numeric_rates = []
-                for i, r in enumerate(rates, 1):
-                    price = self._extract_price(r)
-                    if price is not None:
-                        numeric_rates.append(price)
-                        rate_str = f"{price:.2f}"
-                    else:
-                        rate_str = (r.get('USD', r.get('dollar', 'N/A')) if isinstance(r, dict) else str(r))
-                    lines.append(f"{i}. {r.get('date') if isinstance(r, dict) else 'N/A'}: {rate_str} Bs")
+                # Agrupar por fecha (usar la última entrada por fecha)
+                last_by_date = {}
+                for entry in raw_rates:
+                    if not isinstance(entry, dict):
+                        continue
+                    d = entry.get('date')
+                    if not d:
+                        continue
+                    last_by_date[d] = entry
 
-                # Estadísticas si hay datos numéricos
-                stats_html = ""
+                # Generar lista de fechas desde primer día del mes hasta hoy
+                from datetime import datetime, timedelta
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                dates = []
+                cur = start_dt
+                while cur <= end_dt:
+                    dates.append(cur.strftime("%Y-%m-%d"))
+                    cur += timedelta(days=1)
+
+                rates = [last_by_date.get(d) or {'date': d, 'USD': None} for d in dates]
+
+                # Render en bloques horizontales (BLOCK_SIZE = 15)
+                n = len(rates)
+                BLOCK_SIZE = 15
+                title_html = f'<div style="color:#d1d5db; font-family: sans-serif;"><b>Período: {start_date} a {end_date}</b><br>Fuente: {history.get("source")}<br>Total fechas: {n} — Registros encontrados: {history.get("count", 0)}<br><br>'
+
+                if n == 0:
+                    body_html = "No hay registros para el período solicitado."
+                elif n <= BLOCK_SIZE:
+                    lines = []
+                    for i, rate in enumerate(rates, 1):
+                        price = self._extract_price(rate)
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        lines.append(f"{i}. {rate.get('date')}: {rate_str} Bs")
+                    body_html = "<br>".join(lines)
+                else:
+                    num_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
+                    grid = [["" for _ in range(num_blocks)] for _ in range(BLOCK_SIZE)]
+                    for idx, entry in enumerate(rates):
+                        b = idx // BLOCK_SIZE
+                        r = idx % BLOCK_SIZE
+                        price = self._extract_price(entry)
+                        rate_str = f"{price:.2f}" if price is not None else "-"
+                        grid[r][b] = f"{idx+1}. {entry.get('date')}: {rate_str} Bs"
+
+                    rows_html = []
+                    for r in range(BLOCK_SIZE):
+                        cols_html = []
+                        any_in_row = False
+                        for c in range(num_blocks):
+                            cell = grid[r][c]
+                            if cell:
+                                any_in_row = True
+                                cols_html.append(f'<td style="padding:1px 6px; vertical-align:top; font-family: monospace; white-space:nowrap;">{cell}</td>')
+                            else:
+                                cols_html.append('<td style="padding:1px 6px; vertical-align:top;">&nbsp;</td>')
+                            if c < num_blocks - 1:
+                                cols_html.append('<td style="width:24px;"></td>')
+                        if not any_in_row:
+                            break
+                        rows_html.append('<tr style="line-height:1.1;">' + ''.join(cols_html) + '</tr>')
+
+                    body_html = f'Mostrando {n} fechas.<br><table style="border-collapse:collapse;">' + ''.join(rows_html) + '</table>'
+
+                # Estadísticas
+                numeric_rates = [self._extract_price(r) for r in rates if self._extract_price(r) is not None]
+                stats_html = ''
                 if numeric_rates:
                     minimo = min(numeric_rates)
                     maximo = max(numeric_rates)
@@ -666,29 +975,30 @@ class ZinliMonitorDesktopApp(QWidget):
                         variacion = ((maximo - minimo) / minimo * 100)
                     except ZeroDivisionError:
                         variacion = 0.0
-                    sign_variacion = f"{variacion:+.2f}%"
+                    sign_variacion = f'{variacion:+.2f}%'
                     if variacion > 0:
-                        color = "#10B981"
-                        bg = "rgba(16,185,129,0.12)"
+                        color = '#10B981'
+                        bg = 'rgba(16,185,129,0.12)'
                     elif variacion < 0:
-                        color = "#EF4444"
-                        bg = "rgba(239,68,68,0.12)"
+                        color = '#EF4444'
+                        bg = 'rgba(239,68,68,0.12)'
                     else:
-                        color = "#9CA3AF"
-                        bg = "transparent"
-                    stats_html += "<br><b>Estadísticas:</b><br>"
-                    stats_html += f"&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>"
-                    stats_html += f"&nbsp;&nbsp;Variación: <span style=\"color:{color}; font-weight:700; background-color:{bg}; padding:2px 6px; border-radius:4px;\">{sign_variacion}</span><br>"
+                        color = '#9CA3AF'
+                        bg = 'transparent'
+                    stats_html = (
+                        '<div style="margin-top:10px; line-height:1.6;">'
+                        '<b>Estadísticas:</b><br>'
+                        f'&nbsp;&nbsp;Mínimo: {minimo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Máximo: {maximo:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Promedio: {promedio:.2f} Bs<br>'
+                        f'&nbsp;&nbsp;Variación: <span style="color:{color}; font-weight:700; background-color:{bg}; padding:2px 7px; border-radius:4px;">{sign_variacion}</span><br>'
+                        '</div>'
+                    )
 
-                html = f'<div style="font-family: monospace; color: #d1d5db;">'
-                html += f'<pre style="white-space: pre-wrap; font-family: monospace;">{text}'
-                html += "\n".join(lines)
-                html += '</pre>'
-                html += stats_html
-                html += '</div>'
-
+                html = title_html.replace(
+                    '<div style="color:#d1d5db; font-family: sans-serif;">',
+                    '<div style="color:#d1d5db; font-family: sans-serif; line-height:1.1;">'
+                ) + body_html + stats_html + '</div>'
                 self.history_text.setHtml(html)
 
             elif mode in ("Año específico", "Año en curso"):
