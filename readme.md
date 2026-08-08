@@ -10,7 +10,9 @@ Dólar Monitor recopila automáticamente tasas del BCV y precios de Binance P2P 
 
 - Dashboard con tarjetas resumen (BCV, Binance, Syklo)
 - Pestaña "Análisis 24h": agrupa datos históricos por hora del día para identificar las mejores horas para comprar o vender
+- Pestaña "Proyecciones": genera escenarios de proyección BCV con tres casos (Optimista, Conservador, Estrés) hasta el cierre del año actual
 - Estadísticas y análisis de oportunidades de arbitraje
+- Historial BCV con opción de consulta por rango de fechas
 
 El agente de bandeja (dolar_monitor_agent.py) permite recolectar datos cada 10 minutos sin abrir la interfaz principal.
 
@@ -56,6 +58,19 @@ python3 -m pip install requests PyQt6
 ```bash
 python3 desktop_app.py
 ```
+
+La aplicación incluye las siguientes pestañas:
+
+- **📊 Dashboard**: Muestra tarjetas con tasas actuales de BCV, Binance P2P (VES y USD), y Syklo. Las tarjetas de Binance y Syklo son clickeables para ver detalles de anuncios y órdenes.
+- **🔄 Arbitraje**: Analiza oportunidades de arbitraje entre diferentes fuentes de tasas.
+- **📈 Historial**: Permite consultar historial BCV por diferentes modos (últimos N días, mes específico, año específico).
+- **📊 Estadísticas**: Muestra estadísticas generales con opción de selector de horas.
+- **⏰ Análisis 24h**: Analiza datos históricos de Binance VES agrupados por hora del día para identificar mejores horas para comprar/vender.
+- **🔮 Proyecciones**: Genera tres escenarios de proyección BCV hasta el cierre del año actual:
+  - **Optimista** (3% mensual): Asume intervención cambiaria agresiva y estabilidad en ingresos petroleros
+  - **Conservador** (7% mensual): Refleja aumento estacional de liquidez por gasto público y bonos de fin de año
+  - **Estrés** (15% mensual): Simula caída en oferta de divisas y aceleración en velocidad de circulación del dinero
+  - Incluye botón para ver gráfico comparativo con sustentos técnicos de cada escenario
 
 2. Ejecutar el agente de bandeja (opcional, para recopilación continua):
 
@@ -154,4 +169,4 @@ Licencia: GNU GPL v3 (ver archivo LICENSE en el repositorio).
 
 **Proyecto**: Dólar Monitor  
 **Autor**: Edwin López  
-**Última actualización**: 2026-08-04
+**Última actualización**: 2026-08-07

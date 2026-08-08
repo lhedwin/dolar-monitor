@@ -8,13 +8,19 @@ Estilo profesional basado en el ejemplo de OmenDashboard
 import sys
 import os
 from datetime import datetime
+import matplotlib
+matplotlib.use('Agg')  # Backend no interactivo para evitar problemas
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import pandas as pd
+import requests
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QGridLayout, QTabWidget, QMessageBox,
-    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit, QProgressDialog
+    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit, QProgressDialog, QScrollArea
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate, QThread, QObject
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPixmap
 
 # Agregar ruta del src al path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -182,6 +188,11 @@ class ZinliMonitorDesktopApp(QWidget):
         self.analysis_24h_tab = QWidget()
         self.setup_24h_analysis()
         self.tab_widget.addTab(self.analysis_24h_tab, "⏰ Análisis 24h")
+        
+        # Tab Proyecciones
+        self.projections_tab = QWidget()
+        self.setup_projections()
+        self.tab_widget.addTab(self.projections_tab, "🔮 Proyecciones")
         
         layout_principal.addWidget(self.tab_widget)
         layout_principal.setSpacing(6)  # Reducir spacing entre tab widget y otros elementos
@@ -1136,6 +1147,227 @@ class ZinliMonitorDesktopApp(QWidget):
         
         # Cargar datos iniciales
         QTimer.singleShot(2000, self.analyze_24h)
+    
+    def setup_projections(self):
+        """Configura la pestaña de Proyecciones BCV"""
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 5, 15, 15)
+        layout.setSpacing(18)
+
+        # Título Centrado
+        lbl_titulo = QLabel(f"🔮 Proyecciones BCV - Cierre {datetime.now().year}")
+        lbl_titulo.setObjectName("TituloSeccion")
+        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_titulo)
+
+        # Área de texto para mostrar escenarios
+        self.projections_text = QTextEdit()
+        self.projections_text.setReadOnly(True)
+        self.projections_text.setMinimumHeight(500)
+        # Usar fuente monoespaciada para alineación perfecta
+        font = QFont("Courier New", 10)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.projections_text.setFont(font)
+        layout.addWidget(self.projections_text)
+
+        # Botón de cálculo
+        btn_calcular = QPushButton("Calcular Proyecciones")
+        btn_calcular.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_calcular.clicked.connect(self.calculate_projections)
+        layout.addWidget(btn_calcular)
+
+        # Botón de gráfico
+        btn_grafico = QPushButton("📊 Ver Gráfico de Proyecciones")
+        btn_grafico.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_grafico.clicked.connect(self.show_projections_graph)
+        layout.addWidget(btn_grafico)
+
+        layout.addStretch()
+        self.projections_tab.setLayout(layout)
+        
+        # Cargar datos iniciales
+        QTimer.singleShot(2500, self.calculate_projections)
+    
+    def calculate_projections(self):
+        """Calcula y muestra los tres escenarios de proyección BCV"""
+        self.projections_text.setText("Obteniendo datos de BCV...")
+        
+        try:
+            # Obtener datos de la API BCV Today
+            api_url = "https://bcv.today/api/v1/history.json"
+            response = requests.get(api_url, timeout=10)
+            data = response.json()
+            df = pd.DataFrame(data)
+            df['date'] = pd.to_datetime(df['date'])
+            latest = df.sort_values(by='date', ascending=False).iloc[0]
+            
+            # Obtener precio actual
+            price_value = None
+            for key in ['USD', 'dollar', 'rate', 'bcv']:
+                if key in latest and latest[key] is not None:
+                    price_value = float(latest[key])
+                    break
+            
+            if price_value is None:
+                self.projections_text.setText("Error: No se encontró precio válido en la API")
+                return
+            
+            self.last_price = price_value
+            self.last_date = latest['date']
+            
+            # Definición de escenarios
+            scenarios = {
+                "Optimista": {
+                    "rate": 0.03,
+                    "sustento": "Asume una intervención cambiaria agresiva (> $500M mensuales) y estabilidad en ingresos petroleros."
+                },
+                "Conservador": {
+                    "rate": 0.07,
+                    "sustento": "Refleja el aumento estacional de liquidez (M2) por gasto público y bonos de fin de año."
+                },
+                "Estrés": {
+                    "rate": 0.15,
+                    "sustento": "Simula una caída en la oferta de divisas y una aceleración en la velocidad de circulación del dinero."
+                }
+            }
+            
+            current_month = self.last_date.month
+            current_year = self.last_date.year
+            target_year = current_year  # Usar el año actual
+            months_range = range(current_month, 13)
+            
+            text = f"{'='*80}\n"
+            text += f"INFORME DE PROYECCIÓN CAMBIARIA - CIERRE {target_year}\n"
+            text += f"Punto de partida: {self.last_price:.2f} VES/USD (Fecha: {self.last_date.date()})\n"
+            text += f"{'='*80}\n\n"
+            
+            # Guardar datos para el gráfico
+            self.projections_data = {}
+            
+            for name, info in scenarios.items():
+                text += f"--- ESCENARIO {name.upper()} ---\n"
+                text += f"Sustento: {info['sustento']}\n\n"
+                
+                # Crear tabla para este escenario con alineación perfecta
+                projections = []
+                for month in months_range:
+                    step = month - current_month
+                    month_name = datetime(target_year, month, 1).strftime('%B')
+                    price = self.last_price * ((1 + info['rate']) ** step)
+                    projections.append((month_name, round(price, 2)))
+                
+                # Formatear tabla con alineación perfecta
+                text += f"{'Mes':<15} {'Precio Est. (VES)':>20}\n"
+                text += "-" * 37 + "\n"
+                for month_name, price in projections:
+                    text += f"{month_name:<15} {price:>20.2f}\n"
+                
+                text += "\n" + "-" * 40 + "\n\n"
+                
+                self.projections_data[name] = {
+                    "df": pd.DataFrame(projections, columns=["Mes", "Precio Est. (VES)"]),
+                    "rate": info['rate'],
+                    "sustento": info['sustento']
+                }
+            
+            self.projections_text.setPlainText(text)
+            
+        except Exception as e:
+            self.projections_text.setPlainText(f"Error calculando proyecciones: {e}")
+    
+    def show_projections_graph(self):
+        """Muestra el gráfico de proyecciones en un diálogo"""
+        if not hasattr(self, 'projections_data') or not self.projections_data:
+            QMessageBox.warning(self, "Advertencia", "Primero calcula las proyecciones")
+            return
+        
+        try:
+            # Generar gráfico como imagen
+            fig = Figure(figsize=(10, 6), dpi=100)
+            ax = fig.add_subplot(111)
+            
+            # Dibujar cada escenario
+            colors = ['#10B981', '#F59E0B', '#EF4444']  # Verde, Naranja, Rojo
+            color_idx = 0
+            
+            for name, data in self.projections_data.items():
+                df = data['df']
+                rate = data['rate']
+                sustento = data['sustento']
+                
+                ax.plot(df["Mes"], df["Precio Est. (VES)"], 
+                       marker='o', 
+                       label=f"{name} ({rate*100:.0f}% mensual)",
+                       color=colors[color_idx],
+                       linewidth=2)
+                
+                # Etiquetas en TODOS los puntos
+                for i, (month, price) in enumerate(zip(df["Mes"], df["Precio Est. (VES)"])):
+                    ax.annotate(f'{price:.2f}', 
+                               xy=(month, price),
+                               textcoords="offset points", 
+                               xytext=(0,8 if i % 2 == 0 else -12),  # Alternar posición vertical
+                               ha='center',
+                               fontsize=8,
+                               color=colors[color_idx],
+                               fontweight='bold')
+                
+                color_idx += 1
+            
+            ax.set_title(f"Visualización de Escenarios BCV - Cierre {self.last_date.year}", fontsize=14, fontweight='bold')
+            ax.set_ylabel("Bolívares por Dólar (VES/USD)")
+            ax.set_xlabel("Meses")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper left')
+            
+            # Ajustar márgenes para evitar que se corte el texto superior
+            fig.tight_layout(rect=[0, 0, 1, 0.95])
+            
+            # Guardar gráfico como imagen temporal
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+            fig.savefig(temp_file.name, dpi=100, bbox_inches='tight')
+            temp_file.close()
+            plt.close(fig)
+            
+            # Crear diálogo
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Gráfico de Proyecciones BCV")
+            dialog.resize(900, 700)
+            
+            layout = QVBoxLayout()
+            
+            # Cargar imagen y escalarla al tamaño del diálogo
+            pixmap = QPixmap(temp_file.name)
+            scaled_pixmap = pixmap.scaled(850, 450, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            label = QLabel()
+            label.setPixmap(scaled_pixmap)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label)
+            
+            # Agregar sustentos como footer debajo del gráfico
+            sustento_text = ""
+            for name, data in self.projections_data.items():
+                sustento_text += f"{name}: {data['sustento']}\n\n"
+            
+            sustento_label = QLabel(sustento_text.strip())
+            sustento_label.setWordWrap(True)
+            sustento_label.setStyleSheet("background-color: #e8e8e8; padding: 15px; border-radius: 5px; color: #000000;")
+            layout.addWidget(sustento_label)
+            
+            btn_close = QPushButton("Cerrar")
+            btn_close.clicked.connect(dialog.close)
+            layout.addWidget(btn_close)
+            
+            dialog.setLayout(layout)
+            dialog.exec()
+            
+            # Limpiar archivo temporal
+            import os
+            os.unlink(temp_file.name)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error mostrando gráfico: {e}")
     
     def analyze_24h(self):
         """Analiza las mejores horas para comprar y vender consolidadas por hora del día (00:00 a 23:59)"""
