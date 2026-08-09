@@ -65,3 +65,5 @@ config.local.yaml
 
 # Ignore local test scripts
 pruebas/
+zinli_monitor.db
+.directory
