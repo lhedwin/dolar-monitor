@@ -17,7 +17,8 @@ import requests
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QGridLayout, QTabWidget, QMessageBox,
-    QTextEdit, QSpinBox, QDialog, QComboBox, QDateEdit, QProgressDialog, QScrollArea
+    QTextEdit, QSpinBox, QDoubleSpinBox, QDialog, QComboBox, QDateEdit,
+    QProgressDialog, QScrollArea, QCheckBox, QSizePolicy
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate, QThread, QObject
 from PyQt6.QtGui import QFont, QPixmap
@@ -44,6 +45,564 @@ class DataLoaderWorker(QObject):
             self.finished.emit(data)
         except Exception as e:
             self.error.emit(str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Worker para cargar tasas en background desde la calculadora
+# ──────────────────────────────────────────────────────────────────────────────
+class RatesLoaderWorker(QObject):
+    """Carga todas las tasas en un hilo separado"""
+    finished = pyqtSignal(dict)
+    error    = pyqtSignal(str)
+
+    def __init__(self, monitor):
+        super().__init__()
+        self.monitor = monitor
+
+    def run(self):
+        try:
+            data = self.monitor.get_all_data(save_to_db=False)
+            self.finished.emit(data)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Calculadora de Cambio
+# ──────────────────────────────────────────────────────────────────────────────
+class CalculatorDialog(QDialog):
+    """
+    Calculadora de conversión VES → USD / EUR.
+    Fuentes: BCV, EUR (BCV×1.08), Binance Compra, Syklo VES/USDC.
+    Diseñada para embeberse como widget en una pestaña (no popup).
+    """
+
+    CURRENCY_SYMBOLS = {"VES": "Bs", "USD": "$", "EUR": "€"}
+
+    # Ancho máximo del panel central (para centrado lateral)
+    PANEL_MAX_WIDTH = 700
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.monitor      = parent.monitor
+        self.rates        = {}   # { label: {"ves_per_usd"|"ves_per_eur": float, "icon": str, ...} }
+        self._rates_ready = False
+        self._init_ui()
+        self._load_rates_async()
+
+    # ──────────────────────────────────────────────
+    # UI
+    # ──────────────────────────────────────────────
+    def _init_ui(self):
+        self.setWindowTitle("🧮 Calculadora de Cambio")
+
+        self.setStyleSheet("""
+            QDialog, QWidget#CalcPanel {
+                background-color: #030d16;
+            }
+            QFrame#CalcCard {
+                background-color: #061420;
+                border: 1px solid #102a3f;
+                border-radius: 8px;
+            }
+            QLabel#CalcTitle {
+                color: #ffffff;
+                font-size: 17px;
+                font-weight: bold;
+            }
+            QLabel#SectionLabel {
+                color: #8892b0;
+                font-size: 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+            QDoubleSpinBox, QComboBox {
+                background-color: #0a1e30;
+                color: #d1d5db;
+                border: 1px solid #102a3f;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 14px;
+                min-height: 32px;
+            }
+            QDoubleSpinBox:focus, QComboBox:focus {
+                border: 1px solid #667eea;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #061420;
+                color: #d1d5db;
+                selection-background-color: #102a3f;
+            }
+            QCheckBox {
+                color: #d1d5db;
+                font-size: 12px;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border: 1px solid #102a3f;
+                background: #0a1e30;
+            }
+            QCheckBox::indicator:checked {
+                background: #667eea;
+                border-color: #667eea;
+            }
+            QPushButton#CalcBtn {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px;
+                min-height: 38px;
+            }
+            QPushButton#CalcBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7c93f0, stop:1 #8b5fbf);
+            }
+            QPushButton#CalcBtn:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5264cc, stop:1 #623d88);
+            }
+            QPushButton#ClearBtn {
+                background-color: #061420;
+                color: #8892b0;
+                border: 1px solid #102a3f;
+                border-radius: 6px;
+                font-size: 12px;
+                padding: 8px 18px;
+            }
+            QPushButton#ClearBtn:hover {
+                color: #ffffff;
+                border-color: #667eea;
+            }
+            QFrame#ResultCard {
+                background-color: #061420;
+                border: 1px solid #102a3f;
+                border-radius: 8px;
+            }
+            QFrame#ResultCard[best="true"] {
+                border: 1.5px solid #667eea;
+                background-color: #0a1e30;
+            }
+            QLabel#CardName  { color: #8892b0; font-size: 11px; font-weight: bold; }
+            QLabel#CardRate  { color: #667eea; font-size: 10px; }
+            QLabel#CardValue { color: #ffffff;  font-size: 20px; font-weight: bold; }
+            QLabel#CardBadge { color: #667eea;  font-size: 10px; font-weight: bold; }
+            QLabel#StatusLabel {
+                color: #8892b0;
+                font-size: 11px;
+                font-style: italic;
+            }
+        """)
+
+        # ── Layout raiz: centra el panel horizontalmente ──────────────────────
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        h_center = QHBoxLayout()
+        h_center.setContentsMargins(0, 0, 0, 0)
+        h_center.addStretch(1)
+
+        # ── Panel central ──────────────────────────────────────────────
+        panel = QWidget()
+        panel.setObjectName("CalcPanel")
+        panel.setMaximumWidth(self.PANEL_MAX_WIDTH)
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+
+        inner = QVBoxLayout(panel)
+        inner.setContentsMargins(28, 24, 28, 24)
+        inner.setSpacing(16)
+
+        # Título
+        title = QLabel("🧮 Calculadora de Cambio")
+        title.setObjectName("CalcTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        inner.addWidget(title)
+
+        # ── Fila de entrada ───────────────────────────────────────
+        input_card = QFrame()
+        input_card.setObjectName("CalcCard")
+        input_row = QHBoxLayout(input_card)
+        input_row.setContentsMargins(18, 14, 18, 14)
+        input_row.setSpacing(14)
+
+        # Modo de conversión
+        self.is_ves_to_foreign = True  # True: VES -> USD/EUR | False: USD/EUR -> VES
+
+        # Monto
+        amount_col = QVBoxLayout()
+        self.lbl_amount = QLabel("MONTO EN VES (Bs)")
+        self.lbl_amount.setObjectName("SectionLabel")
+        self.amount_input = QDoubleSpinBox()
+        self.amount_input.setRange(0.01, 1_000_000_000)
+        self.amount_input.setValue(1000.0)
+        self.amount_input.setDecimals(2)
+        self.amount_input.setSingleStep(100)
+        self.amount_input.setGroupSeparatorShown(True)
+        self.amount_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        amount_col.addWidget(self.lbl_amount)
+        amount_col.addWidget(self.amount_input)
+
+        # Botón Switch / Swap
+        self.btn_swap = QPushButton("⇄ Switch")
+        self.btn_swap.setObjectName("ClearBtn")
+        self.btn_swap.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_swap.setToolTip("Cambiar sentido de conversión (VES ↔ Divisa)")
+        self.btn_swap.clicked.connect(self._toggle_direction)
+
+        # Moneda divisa: USD o EUR
+        target_col = QVBoxLayout()
+        self.lbl_target = QLabel("DIVISA (DESTINO)")
+        self.lbl_target.setObjectName("SectionLabel")
+        self.foreign_currency = QComboBox()
+        self.foreign_currency.addItems(["USD", "EUR"])
+        self.foreign_currency.currentTextChanged.connect(self._on_foreign_currency_changed)
+        target_col.addWidget(self.lbl_target)
+        target_col.addWidget(self.foreign_currency)
+
+        input_row.addLayout(amount_col, 4)
+        input_row.addWidget(self.btn_swap)
+        input_row.addLayout(target_col, 2)
+        inner.addWidget(input_card)
+
+        # ── Fuentes de tasas ──────────────────────────────────────
+        sources_card = QFrame()
+        sources_card.setObjectName("CalcCard")
+        sources_vbox = QVBoxLayout(sources_card)
+        sources_vbox.setContentsMargins(18, 12, 18, 12)
+        sources_vbox.setSpacing(10)
+
+        lbl_src = QLabel("FUENTES DE TASA")
+        lbl_src.setObjectName("SectionLabel")
+        sources_vbox.addWidget(lbl_src)
+
+        checks_row = QHBoxLayout()
+        self.chk_bcv       = QCheckBox("💵 BCV")
+        self.chk_eur       = QCheckBox("💶 Euro (BCV)")
+        self.chk_binance   = QCheckBox("📈 Binance Compra")
+        self.chk_syklo_ves = QCheckBox("🔄 Syklo VES/USDC")
+        for chk in (self.chk_bcv, self.chk_eur, self.chk_binance, self.chk_syklo_ves):
+            chk.setChecked(True)
+            checks_row.addWidget(chk)
+        checks_row.addStretch()
+        sources_vbox.addLayout(checks_row)
+        inner.addWidget(sources_card)
+
+        # ── Botones ─────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        self.btn_calc = QPushButton("⚡ CALCULAR")
+        self.btn_calc.setObjectName("CalcBtn")
+        self.btn_calc.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_calc.clicked.connect(self._calculate)
+
+        btn_clear = QPushButton("🗑️ Limpiar")
+        btn_clear.setObjectName("ClearBtn")
+        btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_clear.clicked.connect(self._clear_results)
+
+        btn_row.addWidget(self.btn_calc, 3)
+        btn_row.addWidget(btn_clear, 1)
+        inner.addLayout(btn_row)
+
+        # ── Status ─────────────────────────────────────────────
+        self.lbl_status = QLabel("⏳ Cargando tasas en segundo plano…")
+        self.lbl_status.setObjectName("StatusLabel")
+        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        inner.addWidget(self.lbl_status)
+
+        # ── Área de resultados (scroll) ──────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        self.results_container = QWidget()
+        self.results_container.setStyleSheet("background: transparent;")
+        self.results_layout = QVBoxLayout(self.results_container)
+        self.results_layout.setContentsMargins(0, 0, 0, 0)
+        self.results_layout.setSpacing(8)
+        self.results_layout.addStretch()
+        scroll.setWidget(self.results_container)
+        inner.addWidget(scroll, 1)
+
+        # Ensamblar centrándolo
+        h_center.addWidget(panel)
+        h_center.addStretch(1)
+        root.addLayout(h_center)
+
+    # ──────────────────────────────────────────────
+    # Carga de tasas en background
+    # ──────────────────────────────────────────────
+    def _load_rates_async(self):
+        self.btn_calc.setEnabled(False)
+        self._rates_thread = QThread()
+        self._rates_worker = RatesLoaderWorker(self.monitor)
+        self._rates_worker.moveToThread(self._rates_thread)
+        self._rates_thread.started.connect(self._rates_worker.run)
+        self._rates_worker.finished.connect(self._on_rates_loaded)
+        self._rates_worker.error.connect(self._on_rates_error)
+        self._rates_worker.finished.connect(self._rates_thread.quit)
+        self._rates_thread.finished.connect(self._rates_thread.deleteLater)
+        self._rates_thread.start()
+
+    def _on_rates_loaded(self, data):
+        """Parsea las fuentes requeridas."""
+        try:
+            # 1. BCV → Bs/USD
+            bcv_rate = None
+            bcv_data = data.get("bcv", {})
+            if "error" not in bcv_data:
+                r = bcv_data.get("rate")
+                if r and r != "--":
+                    bcv_rate = float(r)
+                    self.rates["BCV"] = {"ves_per_usd": bcv_rate, "icon": "💵", "is_eur": False}
+
+            # 2. EUR: BCV × 1.08 → Bs/EUR
+            if bcv_rate:
+                eur_bs = bcv_rate * 1.08
+                self.rates["Euro (BCV)"] = {"ves_per_eur": eur_bs, "icon": "💶", "is_eur": True}
+
+            # 3. Binance Compra y Venta → Bs/USD
+            ves_data = data.get("binance_ves", {})
+            if "error" not in ves_data:
+                buy = ves_data.get("buy_stats", {}).get("avg_price")
+                sell = ves_data.get("sell_stats", {}).get("avg_price")
+                if buy and buy != "--":
+                    self.rates["Binance Compra"] = {"ves_per_usd": float(buy), "icon": "📈", "is_eur": False}
+                if sell and sell != "--":
+                    self.rates["Binance Venta"] = {"ves_per_usd": float(sell), "icon": "📉", "is_eur": False}
+
+            # 4. Syklo VES/USDC → Bs/USDC (≈ Bs/USD)
+            syklo_ves = data.get("syklo_ves_usdc", {})
+            if "error" not in syklo_ves:
+                avg = syklo_ves.get("avg_price")
+                if avg is None:
+                    prices = []
+                    for o in syklo_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
+                            try:
+                                prices.append(float(p))
+                            except Exception:
+                                pass
+                    avg = sum(prices) / len(prices) if prices else None
+                if avg:
+                    self.rates["Syklo VES/USDC"] = {"ves_per_usd": float(avg), "icon": "🔄", "is_eur": False}
+
+            self._rates_ready = True
+            self.lbl_status.setText(f"✅ Fuentes cargadas — listo para calcular")
+            self.btn_calc.setEnabled(True)
+
+        except Exception as e:
+            self.lbl_status.setText(f"⚠️ Error parseando tasas: {e}")
+            self.btn_calc.setEnabled(True)
+
+    def _on_rates_error(self, msg):
+        self.lbl_status.setText(f"⚠️ Error cargando tasas: {msg}")
+        self.btn_calc.setEnabled(True)
+
+    # ──────────────────────────────────────────────
+    # Cálculo
+    # ──────────────────────────────────────────────
+    @staticmethod
+    def _sym(currency):
+        return CalculatorDialog.CURRENCY_SYMBOLS.get(currency, currency)
+
+    @staticmethod
+    def _fmt_es(val, decimals=2):
+        """Formatea un número según el estándar en español (miles con punto, decimales con coma)."""
+        s = f"{val:,.{decimals}f}"
+        # Se intercambian las comas y los puntos usando una sustitución temporal
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _toggle_direction(self):
+        """Alterna el sentido de conversión (VES -> Divisa <-> Divisa -> VES)."""
+        self.is_ves_to_foreign = not self.is_ves_to_foreign
+        foreign = self.foreign_currency.currentText()
+        sym = self._sym(foreign)
+
+        if self.is_ves_to_foreign:
+            self.lbl_amount.setText("MONTO EN VES (Bs)")
+            self.lbl_target.setText("DIVISA (DESTINO)")
+            self.chk_binance.setText("📈 Binance Compra")
+            if self.amount_input.value() < 100:
+                self.amount_input.setValue(1000.0)
+        else:
+            self.lbl_amount.setText(f"MONTO EN {foreign} ({sym})")
+            self.lbl_target.setText("CONVERTIR A: VES (Bs)")
+            self.chk_binance.setText("📉 Binance Venta")
+            if self.amount_input.value() >= 1000:
+                self.amount_input.setValue(100.0)
+
+        self._clear_results()
+
+    def _on_foreign_currency_changed(self, foreign):
+        if not self.is_ves_to_foreign:
+            sym = self._sym(foreign)
+            self.lbl_amount.setText(f"MONTO EN {foreign} ({sym})")
+        self._clear_results()
+
+    def _clear_results(self):
+        """Limpia el área de resultados sin cerrar la calculadora."""
+        while self.results_layout.count() > 1:
+            item = self.results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.lbl_status.setText("🗑️ Resultados limpiados.")
+
+    def _calculate(self):
+        """Convierte VES ↔ Divisa (USD/EUR) según la dirección activa y las fuentes seleccionadas."""
+        amount  = self.amount_input.value()
+        foreign = self.foreign_currency.currentText()  # "USD" o "EUR"
+        sym_f   = self._sym(foreign)
+
+        if not self.rates:
+            self.lbl_status.setText("⚠️ Tasas no disponibles todavía, espera un momento.")
+            return
+
+        binance_key = "Binance Compra" if self.is_ves_to_foreign else "Binance Venta"
+
+        # Filtro de fuentes activas
+        source_filter = {
+            "BCV":            self.chk_bcv.isChecked(),
+            "Euro (BCV)":     self.chk_eur.isChecked(),
+            binance_key:      self.chk_binance.isChecked(),
+            "Syklo VES/USDC": self.chk_syklo_ves.isChecked(),
+        }
+
+        results = []  # [(nombre, icono, valor_convertido, tasa_str)]
+        for name, info in self.rates.items():
+            if not source_filter.get(name, False):
+                continue
+
+            if info.get("is_eur"):
+                if foreign != "EUR":
+                    continue
+                vpe = info["ves_per_eur"]
+                if self.is_ves_to_foreign:
+                    converted = amount / vpe
+                else:
+                    converted = amount * vpe
+                rate_str = f"1 € = {self._fmt_es(vpe)} Bs"
+            else:
+                if foreign == "EUR":
+                    continue
+                vpu = info["ves_per_usd"]
+                if self.is_ves_to_foreign:
+                    converted = amount / vpu
+                else:
+                    converted = amount * vpu
+                rate_str = f"1 USD = {self._fmt_es(vpu)} Bs"
+
+            results.append((name, info["icon"], converted, rate_str))
+
+        # Limpiar resultados anteriores
+        while self.results_layout.count() > 1:
+            item = self.results_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not results:
+            lbl = QLabel(f"⚠️ No hay fuentes seleccionadas para esta conversión.")
+            lbl.setStyleSheet("color:#8892b0; font-size:12px;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setWordWrap(True)
+            self.results_layout.insertWidget(0, lbl)
+            return
+
+        # Ordenamiento:
+        # - VES -> Divisa: mayor resultado primero (más divisa por los Bs)
+        # - Divisa -> VES: menor resultado si vas a pagar/vender o mayor si recibes Bs.
+        #   Normalmente se busca obtener la mayor cantidad de Bs posibles por la divisa.
+        results.sort(key=lambda r: r[2], reverse=True)
+
+        best_val  = results[0][2]
+        worst_val = results[-1][2]
+
+        if self.is_ves_to_foreign:
+            header_text = f"Convirtiendo {self._fmt_es(amount)} Bs → {foreign}"
+            display_sym = sym_f
+        else:
+            header_text = f"Convirtiendo {self._fmt_es(amount)} {sym_f} → VES (Bs)"
+            display_sym = "Bs"
+
+        header = QLabel(header_text)
+        header.setStyleSheet("color:#8892b0; font-size:11px; padding-bottom:4px;")
+        self.results_layout.insertWidget(0, header)
+
+        for idx, (name, icon, value, rate_str) in enumerate(results):
+            is_best  = (idx == 0)
+            is_worst = (idx == len(results) - 1 and len(results) > 1)
+            display  = f"{self._fmt_es(value)} {display_sym}"
+            card = self._make_result_card(
+                name=f"{icon}  {name}",
+                value=display,
+                rate_str=rate_str,
+                is_best=is_best,
+                is_worst=is_worst,
+            )
+            self.results_layout.insertWidget(idx + 1, card)
+
+        if len(results) >= 2 and worst_val and worst_val != 0:
+            spread = abs((best_val - worst_val) / worst_val) * 100
+            lbl_spread = QLabel(f"📐 Spread mejor/peor: {self._fmt_es(spread)}%")
+            lbl_spread.setStyleSheet("color:#8892b0; font-size:11px; padding-top:4px;")
+            self.results_layout.insertWidget(len(results) + 1, lbl_spread)
+
+        self.lbl_status.setText(f"✅ Conversión completada: {header_text}")
+
+    # ──────────────────────────────────────────────
+    # Tarjeta de resultado
+    # ──────────────────────────────────────────────
+    def _make_result_card(self, name, value, rate_str, is_best, is_worst):
+        card = QFrame()
+        card.setObjectName("ResultCard")
+        if is_best:
+            card.setProperty("best", "true")
+            card.style().unpolish(card)
+            card.style().polish(card)
+
+        row = QHBoxLayout(card)
+        row.setContentsMargins(18, 12, 18, 12)
+        row.setSpacing(14)
+
+        left = QVBoxLayout()
+        lbl_name = QLabel(name)
+        lbl_name.setObjectName("CardName")
+        lbl_rate = QLabel(rate_str)
+        lbl_rate.setObjectName("CardRate")
+        left.addWidget(lbl_name)
+        left.addWidget(lbl_rate)
+        row.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.setAlignment(Qt.AlignmentFlag.AlignRight)
+        lbl_value = QLabel(value)
+        lbl_value.setObjectName("CardValue")
+        lbl_value.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right.addWidget(lbl_value)
+
+        badges = QHBoxLayout()
+        badges.setAlignment(Qt.AlignmentFlag.AlignRight)
+        if is_best:
+            b = QLabel("⭐ MEJOR")
+            b.setObjectName("CardBadge")
+            badges.addWidget(b)
+        elif is_worst:
+            b = QLabel("⬇ PEOR")
+            b.setStyleSheet("color:#8892b0; font-size:10px; font-weight:bold;")
+            badges.addWidget(b)
+        right.addLayout(badges)
+        row.addLayout(right)
+
+        return card
+
 
 
 class ZinliMonitorDesktopApp(QWidget):
@@ -193,7 +752,12 @@ class ZinliMonitorDesktopApp(QWidget):
         self.projections_tab = QWidget()
         self.setup_projections()
         self.tab_widget.addTab(self.projections_tab, "🔮 Proyecciones")
-        
+
+        # Tab Calculadora
+        self.calculator_tab = QWidget()
+        self.setup_calculator_tab()
+        self.tab_widget.addTab(self.calculator_tab, "🧮 Calculadora")
+
         layout_principal.addWidget(self.tab_widget)
         layout_principal.setSpacing(6)  # Reducir spacing entre tab widget y otros elementos
 
@@ -244,6 +808,18 @@ class ZinliMonitorDesktopApp(QWidget):
         # Iniciar el thread
         self.data_thread.start()
     
+    @staticmethod
+    def fmt_es(val, decimals=2):
+        """Formatea un número según el estándar en español (miles con punto, decimales con coma)."""
+        if val is None or val == "--":
+            return "--"
+        try:
+            v = float(val)
+            s = f"{v:,.{decimals}f}"
+            return s.replace(",", "X").replace(".", ",").replace("X", ".")
+        except Exception:
+            return str(val)
+
     def on_data_loaded(self, data):
         """Callback cuando los datos se cargan exitosamente"""
         try:
@@ -254,7 +830,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 if bcv_rate != "--":
                     bcv_rate = float(bcv_rate)
                     euro_rate = bcv_rate * 1.08
-                    self.bcv_card.update_value(f"${bcv_rate:.2f} Bs\n€{euro_rate:.2f} Bs")
+                    self.bcv_card.update_value(f"${self.fmt_es(bcv_rate)} Bs\n€{self.fmt_es(euro_rate)} Bs")
                 else:
                     self.bcv_card.update_value("--")
                 self.bcv_card.update_subtitle(bcv_data.get("date", "--"))
@@ -267,9 +843,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 buy_avg = ves_data.get("buy_stats", {}).get("avg_price", "--")
                 sell_avg = ves_data.get("sell_stats", {}).get("avg_price", "--")
                 if buy_avg != "--" and sell_avg != "--":
-                    buy_avg = float(buy_avg)
-                    sell_avg = float(sell_avg)
-                    self.binance_ves_card.update_value(f"Buy: {buy_avg:.2f}\nSell: {sell_avg:.2f}")
+                    self.binance_ves_card.update_value(f"Buy: {self.fmt_es(buy_avg)}\nSell: {self.fmt_es(sell_avg)}")
                 else:
                     self.binance_ves_card.update_value("--")
             else:
@@ -281,9 +855,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 buy_avg = usd_data.get("buy_stats", {}).get("avg_price", "--")
                 sell_avg = usd_data.get("sell_stats", {}).get("avg_price", "--")
                 if buy_avg != "--" and sell_avg != "--":
-                    buy_avg = float(buy_avg)
-                    sell_avg = float(sell_avg)
-                    self.binance_usd_card.update_value(f"Buy: ${buy_avg:.3f}\nSell: ${sell_avg:.3f}")
+                    self.binance_usd_card.update_value(f"Buy: ${self.fmt_es(buy_avg, 3)}\nSell: ${self.fmt_es(sell_avg, 3)}")
                 else:
                     self.binance_usd_card.update_value("--")
             else:
@@ -296,8 +868,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 if orders and len(orders) > 0:
                     best_rate = orders[0].get("price", "--")
                     if best_rate != "--":
-                        best_rate = float(best_rate)
-                        self.syklo_ves_card.update_value(f"{best_rate:.2f} Bs")
+                        self.syklo_ves_card.update_value(f"{self.fmt_es(best_rate)} Bs")
                     else:
                         self.syklo_ves_card.update_value("--")
                 else:
@@ -312,14 +883,17 @@ class ZinliMonitorDesktopApp(QWidget):
                 if orders and len(orders) > 0:
                     best_rate = orders[0].get("price", "--")
                     if best_rate != "--":
-                        best_rate = float(best_rate)
-                        self.syklo_usd_card.update_value(f"${best_rate:.4f}")
+                        self.syklo_usd_card.update_value(f"${self.fmt_es(best_rate, 4)}")
                     else:
                         self.syklo_usd_card.update_value("--")
                 else:
                     self.syklo_usd_card.update_value("--")
             else:
                 self.syklo_usd_card.update_value("Error")
+            
+            # Actualizar timestamp de última actualización
+            now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            self.lbl_last_updated.setText(f"Datos actualizados: {now_str}")
             
             # Cerrar diálogo de carga
             self.loading_dialog.close()
@@ -332,6 +906,14 @@ class ZinliMonitorDesktopApp(QWidget):
         """Callback cuando hay un error cargando datos"""
         self.loading_dialog.close()
         QMessageBox.critical(self, "Error", f"Error cargando datos: {error_msg}")
+    
+    def show_calculator(self):
+        """Muestra el diálogo de la calculadora de cambio"""
+        try:
+            dialog = CalculatorDialog(self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error abriendo calculadora: {e}")
     
     def setup_dashboard(self):
         """Configura el dashboard usando QFrame como el ejemplo"""
@@ -1188,6 +1770,22 @@ class ZinliMonitorDesktopApp(QWidget):
         # Cargar datos iniciales
         QTimer.singleShot(2500, self.calculate_projections)
     
+    def setup_calculator_tab(self):
+        """Configura la pestaña de calculadora embebiendo el widget de CalculatorDialog"""
+        # Usamos un QVBoxLayout con un scroll para hospedar el contenido
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Creamos el widget de la calculadora directamente (sin abrir como diálogo)
+        self._calc_widget = CalculatorDialog(self)
+        # Quitamos los botones de ventana modal y lo integramos como widget normal
+        self._calc_widget.setWindowFlags(Qt.WindowType.Widget)
+        outer_layout.addWidget(self._calc_widget)
+
+        self.calculator_tab.setLayout(outer_layout)
+
+
     def calculate_projections(self):
         """Calcula y muestra los tres escenarios de proyección BCV"""
         self.projections_text.setText("Obteniendo datos de BCV...")
@@ -1564,9 +2162,31 @@ class ZinliMonitorDesktopApp(QWidget):
             QMessageBox.critical(self, "Error", f"Error al obtener datos: {e}")
     
     def refresh_dashboard(self):
-        """Actualiza los datos del dashboard"""
+        """Actualiza los datos del dashboard usando un hilo separado para no bloquear la UI"""
+        # Mostrar diálogo de carga
+        self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.loading_dialog.show()
+        self.loading_dialog.raise_()
+        self.loading_dialog.activateWindow()
+        QApplication.processEvents()
+
+        # Crear worker y thread
+        self.refresh_thread = QThread()
+        self.refresh_worker = DataLoaderWorker(self.monitor)
+        self.refresh_worker.moveToThread(self.refresh_thread)
+
+        self.refresh_thread.started.connect(self.refresh_worker.run)
+        self.refresh_worker.finished.connect(self._on_refresh_done)
+        self.refresh_worker.error.connect(self._on_refresh_error)
+        self.refresh_worker.finished.connect(self.refresh_thread.quit)
+        self.refresh_thread.finished.connect(self.refresh_thread.deleteLater)
+
+        self.refresh_thread.start()
+
+    def _on_refresh_done(self, data):
+        """Callback cuando el refresco de datos termina exitosamente"""
+        self.loading_dialog.close()
         try:
-            data = self.monitor.get_all_data(save_to_db=True)
             
             # BCV
             bcv_data = data.get("bcv", {})
@@ -1576,7 +2196,7 @@ class ZinliMonitorDesktopApp(QWidget):
                     bcv_rate = float(bcv_rate)
                     # Calcular euro (1 EUR ≈ 1.08 USD)
                     euro_rate = bcv_rate * 1.08
-                    self.bcv_card.update_value(f"${bcv_rate:.2f} Bs\n€{euro_rate:.2f} Bs")
+                    self.bcv_card.update_value(f"${self.fmt_es(bcv_rate)} Bs\n€{self.fmt_es(euro_rate)} Bs")
                 else:
                     self.bcv_card.update_value("--")
                 self.bcv_card.update_subtitle(bcv_data.get("date", "--"))
@@ -1589,9 +2209,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 buy_avg = ves_data.get("buy_stats", {}).get("avg_price", "--")
                 sell_avg = ves_data.get("sell_stats", {}).get("avg_price", "--")
                 if buy_avg != "--" and sell_avg != "--":
-                    buy_avg = float(buy_avg)
-                    sell_avg = float(sell_avg)
-                    self.binance_ves_card.update_value(f"Buy: {buy_avg:.2f}\nSell: {sell_avg:.2f}")
+                    self.binance_ves_card.update_value(f"Buy: {self.fmt_es(buy_avg)}\nSell: {self.fmt_es(sell_avg)}")
                 else:
                     self.binance_ves_card.update_value("--")
             else:
@@ -1603,9 +2221,7 @@ class ZinliMonitorDesktopApp(QWidget):
                 buy_avg = usd_data.get("buy_stats", {}).get("avg_price", "--")
                 sell_avg = usd_data.get("sell_stats", {}).get("avg_price", "--")
                 if buy_avg != "--" and sell_avg != "--":
-                    buy_avg = float(buy_avg)
-                    sell_avg = float(sell_avg)
-                    self.binance_usd_card.update_value(f"Buy: ${buy_avg:.3f}\nSell: ${sell_avg:.3f}")
+                    self.binance_usd_card.update_value(f"Buy: ${self.fmt_es(buy_avg, 3)}\nSell: ${self.fmt_es(sell_avg, 3)}")
                 else:
                     self.binance_usd_card.update_value("--")
             else:
@@ -1657,13 +2273,16 @@ class ZinliMonitorDesktopApp(QWidget):
                         self.syklo_usd_card.update_value("--")
                 else:
                     self.syklo_usd_card.update_value("--")
-            # Actualizar timestamp de última actualización
-            now_str = datetime.now().strftime("%d/%m/%Y:%H:%M:%S")
+            now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             self.lbl_last_updated.setText(f"Datos actualizados: {now_str}")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error actualizando: {e}")
 
+    def _on_refresh_error(self, error_msg):
+        """Callback cuando el refresco de datos falla"""
+        self.loading_dialog.close()
+        QMessageBox.critical(self, "Error", f"Error actualizando datos: {error_msg}")
 
 class RateCard(QFrame):
     """Tarjeta usando QFrame como el ejemplo de OmenDashboard"""

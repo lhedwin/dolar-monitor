@@ -8,9 +8,11 @@ Aplicación de escritorio y agente de bandeja para recopilar y analizar tasas (B
 
 Dólar Monitor recopila automáticamente tasas del BCV y precios de Binance P2P (USDT/VES, USDT/USD) junto con datos de Syklo. Los datos se guardan en una base SQLite (zinli_monitor.db) y la app de escritorio muestra:
 
-- Dashboard con tarjetas resumen (BCV, Binance, Syklo)
+- Dashboard con tarjetas resumen (BCV, Binance, Syklo) y actualización fluida en segundo plano
+- Pestaña "🧮 Calculadora": conversiones bidireccionales (VES ↔ USD / EUR) con soporte de tasas oficiales (BCV, Euro BCV) y de mercado P2P (Binance Compra/Venta, Syklo)
 - Pestaña "Análisis 24h": agrupa datos históricos por hora del día para identificar las mejores horas para comprar o vender
 - Pestaña "Proyecciones": genera escenarios de proyección BCV con tres casos (Optimista, Conservador, Estrés) hasta el cierre del año actual
+- Formato numérico adaptado al español (separador de miles con punto `.` y decimales con coma `,`)
 - Estadísticas y análisis de oportunidades de arbitraje
 - Historial BCV con opción de consulta por rango de fechas
 
@@ -22,12 +24,14 @@ El agente de bandeja (dolar_monitor_agent.py) permite recolectar datos cada 10 m
 /home/lhedwin/Programacion/Git/Zinli/
 ├── desktop_app.py                 # Aplicación principal (GUI)
 ├── dolar_monitor_agent.py         # Agente de bandeja (tray) que recolecta datos periódicamente
-├── readme.md                      # Este archivo (documentación de instalación y uso)
-├── config.yaml                    # Configuración (opcional)
-├── zinli_monitor.db               # Base de datos SQLite (datos históricos) — generar con scripts/init_db.py
+├── config.yaml                    # Configuración activa (opcional)
+├── config.example.yaml            # Plantilla de configuración
+├── LICENSE                        # Licencia del proyecto (GNU GPL v3)
+├── readme.md                      # Documentación del proyecto
+├── zinli_monitor.db               # Base de datos SQLite (datos históricos)
 ├── scripts/                       # Scripts auxiliares (init DB, actualización BCV)
-│   ├── init_db.py                 # Wrapper para crear ./zinli_monitor.db (usar al configurar por primera vez)
-│   └── update_bcv_db.py           # Descarga history.json de BCV y vuelca registros únicos a la BD local
+│   ├── init_db.py                 # Wrapper para crear ./zinli_monitor.db
+│   └── update_bcv_db.py           # Descarga e integra historial oficial del BCV
 └── src/
     ├── database.py                # Gestor de la base de datos (leer/escribir históricos)
     ├── config_manager.py          # Cargador de configuración
@@ -61,7 +65,7 @@ python3 desktop_app.py
 
 La aplicación incluye las siguientes pestañas:
 
-- **📊 Dashboard**: Muestra tarjetas con tasas actuales de BCV, Binance P2P (VES y USD), y Syklo. Las tarjetas de Binance y Syklo son clickeables para ver detalles de anuncios y órdenes.
+- **📊 Dashboard**: Muestra tarjetas con tasas actuales de BCV, Binance P2P (VES y USD), y Syklo. Carga asíncrona en segundo plano para evitar bloqueos de la UI y marca de tiempo en el footer.
 - **🔄 Arbitraje**: Analiza oportunidades de arbitraje entre diferentes fuentes de tasas.
 - **📈 Historial**: Permite consultar historial BCV por diferentes modos (últimos N días, mes específico, año específico).
 - **📊 Estadísticas**: Muestra estadísticas generales con opción de selector de horas.
@@ -71,6 +75,11 @@ La aplicación incluye las siguientes pestañas:
   - **Conservador** (7% mensual): Refleja aumento estacional de liquidez por gasto público y bonos de fin de año
   - **Estrés** (15% mensual): Simula caída en oferta de divisas y aceleración en velocidad de circulación del dinero
   - Incluye botón para ver gráfico comparativo con sustentos técnicos de cada escenario
+- **🧮 Calculadora**: Herramienta de conversión centrada y responsiva con soporte bidireccional (VES ↔ Divisas USD/EUR).
+  - Permite conmutar con el botón `⇄ Switch` entre modo directo (VES → Divisa) e inverso (Divisa → VES).
+  - Ajusta dinámicamente las tasas entre **Binance Compra** (VES → Divisa) y **Binance Venta** (Divisa → VES).
+  - Incluye botón **🗑️ Limpiar** para vaciar resultados sin cerrar la pestaña.
+  - Muestra todos los montos con formato numérico en castellano (ej: `1.500,00 Bs`).
 
 2. Ejecutar el agente de bandeja (opcional, para recopilación continua):
 
@@ -169,4 +178,4 @@ Licencia: GNU GPL v3 (ver archivo LICENSE en el repositorio).
 
 **Proyecto**: Dólar Monitor  
 **Autor**: Edwin López  
-**Última actualización**: 2026-08-07
+**Última actualización**: 2026-08-08
