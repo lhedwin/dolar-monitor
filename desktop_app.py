@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """
 Zinli Monitor - Aplicación de Escritorio
-Estilo profesional basado en el ejemplo de OmenDashboard
+Interfaz gráfica profesional con monitoreo en tiempo real, historial, arbitraje y proyecciones.
 """
 
 import sys
 import os
-from datetime import datetime
-from typing import Callable, Dict, Any, Optional
+import calendar
+from datetime import datetime, timedelta
+from typing import Callable, Dict, Any, Optional, List
 
 import matplotlib
 matplotlib.use('Agg')  # Backend no interactivo
@@ -21,10 +22,11 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFrame, QGridLayout, QTabWidget, QMessageBox,
     QTextEdit, QSpinBox, QDoubleSpinBox, QDialog, QComboBox, QDateEdit,
-    QProgressDialog, QScrollArea, QCheckBox, QSizePolicy
+    QProgressDialog, QScrollArea, QCheckBox, QSizePolicy, QTableWidget,
+    QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal, QDate, QThread, QObject
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtGui import QFont, QPixmap, QColor
 
 # Agregar ruta del src al path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -32,6 +34,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from zinli_monitor import ZinliMonitor
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Workers Asíncronos (Hilo Secundario)
+# ──────────────────────────────────────────────────────────────────────────────
 class DataLoaderWorker(QObject):
     """Worker para cargar datos generales en un hilo separado"""
     finished = pyqtSignal(dict)
@@ -83,6 +88,9 @@ class CardDetailWorker(QObject):
             self.error.emit(str(e))
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Calculadora de Cambio Embebida
+# ──────────────────────────────────────────────────────────────────────────────
 class CalculatorDialog(QDialog):
     """Calculadora de conversión VES ↔ USD / EUR."""
 
@@ -324,11 +332,6 @@ class CalculatorDialog(QDialog):
     def _sym(currency: str) -> str:
         return CalculatorDialog.CURRENCY_SYMBOLS.get(currency, currency)
 
-    @staticmethod
-    def _fmt_es(val: float, decimals: int = 2) -> str:
-        s = f"{val:,.{decimals}f}"
-        return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
     def _toggle_direction(self) -> None:
         self.is_ves_to_foreign = not self.is_ves_to_foreign
         foreign = self.foreign_currency.currentText()
@@ -393,13 +396,13 @@ class CalculatorDialog(QDialog):
                     continue
                 vpe = info["ves_per_eur"]
                 converted = (amount / vpe) if self.is_ves_to_foreign else (amount * vpe)
-                rate_str = f"1 € = {self._fmt_es(vpe)} Bs"
+                rate_str = f"1 € = {ZinliMonitorDesktopApp.fmt_es(vpe)} Bs"
             else:
                 if foreign == "EUR":
                     continue
                 vpu = info["ves_per_usd"]
                 converted = (amount / vpu) if self.is_ves_to_foreign else (amount * vpu)
-                rate_str = f"1 USD = {self._fmt_es(vpu)} Bs"
+                rate_str = f"1 USD = {ZinliMonitorDesktopApp.fmt_es(vpu)} Bs"
 
             results.append((name, info["icon"], converted, rate_str))
 
@@ -421,10 +424,10 @@ class CalculatorDialog(QDialog):
         worst_val = results[-1][2]
 
         if self.is_ves_to_foreign:
-            header_text = f"Convirtiendo {self._fmt_es(amount)} Bs → {foreign}"
+            header_text = f"Convirtiendo {ZinliMonitorDesktopApp.fmt_es(amount)} Bs → {foreign}"
             display_sym = sym_f
         else:
-            header_text = f"Convirtiendo {self._fmt_es(amount)} {sym_f} → VES (Bs)"
+            header_text = f"Convirtiendo {ZinliMonitorDesktopApp.fmt_es(amount)} {sym_f} → VES (Bs)"
             display_sym = "Bs"
 
         header = QLabel(header_text)
@@ -434,7 +437,7 @@ class CalculatorDialog(QDialog):
         for idx, (name, icon, value, rate_str) in enumerate(results):
             is_best = (idx == 0)
             is_worst = (idx == len(results) - 1 and len(results) > 1)
-            display = f"{self._fmt_es(value)} {display_sym}"
+            display = f"{ZinliMonitorDesktopApp.fmt_es(value)} {display_sym}"
             card = self._make_result_card(
                 name=f"{icon}  {name}",
                 value=display,
@@ -446,7 +449,7 @@ class CalculatorDialog(QDialog):
 
         if len(results) >= 2 and worst_val and worst_val != 0:
             spread = abs((best_val - worst_val) / worst_val) * 100
-            lbl_spread = QLabel(f"📐 Spread mejor/peor: {self._fmt_es(spread)}%")
+            lbl_spread = QLabel(f"📐 Spread mejor/peor: {ZinliMonitorDesktopApp.fmt_es(spread)}%")
             lbl_spread.setStyleSheet("color:#8892b0; font-size:11px; padding-top:4px;")
             self.results_layout.insertWidget(len(results) + 1, lbl_spread)
 
@@ -496,6 +499,263 @@ class CalculatorDialog(QDialog):
         return card
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Tarjeta Informativa Clicable
+# ──────────────────────────────────────────────────────────────────────────────
+class RateCard(QFrame):
+    """Tarjeta de tasa con evento clicable"""
+    clicked = pyqtSignal()
+    
+    def __init__(self, title: str, value: str, subtitle: str, clickable: bool = False) -> None:
+        super().__init__()
+        self.setObjectName("Tarjeta")
+        self.clickable = clickable
+        if clickable:
+            self.setProperty("clicable", "true")
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 12, 20, 15)
+        layout.setSpacing(6)
+
+        lbl_titulo = QLabel(title)
+        lbl_titulo.setObjectName("TituloSeccion")
+        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_titulo)
+
+        self.lbl_valor = QLabel(value)
+        self.lbl_valor.setObjectName("Valor")
+        self.lbl_valor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_valor)
+
+        self.lbl_subtitulo = QLabel(subtitle)
+        self.lbl_subtitulo.setObjectName("Subtitulo")
+        self.lbl_subtitulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.lbl_subtitulo)
+    
+    def mousePressEvent(self, event: Any) -> None:
+        if self.clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+    
+    def update_value(self, new_value: Any) -> None:
+        self.lbl_valor.setText(str(new_value))
+    
+    def update_subtitle(self, new_subtitle: Any) -> None:
+        self.lbl_subtitulo.setText(str(new_subtitle))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Diálogos de Detalle Formateados
+# ──────────────────────────────────────────────────────────────────────────────
+class BinanceAdsDialog(QDialog):
+    """Diálogo para mostrar anuncios estructurados de Binance P2P"""
+    
+    def __init__(self, title: str, data: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(650)
+        self.data = data
+        
+        if "Zinli" in title or "USD" in title:
+            self.fiat_currency = "USD"
+            self.price_currency = "USD"
+            self.decimals = 3
+        else:
+            self.fiat_currency = "VES"
+            self.price_currency = "VES"
+            self.decimals = 2
+
+        self.setup_ui()
+        self.display_ads()
+    
+    def setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        title_label = QLabel(f"📊 {self.windowTitle()}")
+        title_label.setObjectName("TituloSeccion")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+        layout.addSpacing(10)
+        
+        self.ads_text = QTextEdit()
+        self.ads_text.setReadOnly(True)
+        self.ads_text.setMinimumHeight(500)
+        layout.addWidget(self.ads_text)
+        
+        btn_cerrar = QPushButton("Cerrar")
+        btn_cerrar.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cerrar.clicked.connect(self.accept)
+        layout.addWidget(btn_cerrar)
+    
+    def display_ads(self) -> None:
+        text = ""
+        buy_ads = self.data.get("top_buy_ads", []) if isinstance(self.data, dict) else []
+        sell_ads = self.data.get("top_sell_ads", []) if isinstance(self.data, dict) else []
+
+        if buy_ads:
+            text += "🟢 ANUNCIOS DE COMPRA (Top 5 - Comerciantes Verificados)\n"
+            text += "=" * 60 + "\n\n"
+            for i, ad in enumerate(buy_ads[:5], 1):
+                m_name = ad.get('merchant_name', 'N/A')
+                price = ZinliMonitorDesktopApp.fmt_es(ad.get('price'), self.decimals)
+                available = ZinliMonitorDesktopApp.fmt_es(ad.get('available_amount'), 2)
+                min_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('min_amount'), 0)
+                max_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('max_amount'), 0)
+                u_type = ad.get('user_type', 'N/A')
+                orders = ad.get('order_count', 'N/A')
+                rate = ad.get('completion_rate')
+                rate_str = f"{rate:.1f}%" if isinstance(rate, (int, float)) else "N/A"
+
+                text += f"{i}. {m_name}\n"
+                text += f"   Precio: {price} {self.price_currency}\n"
+                text += f"   Disponible: {available} USDT\n"
+                text += f"   Límites: {min_amt} - {max_amt} {self.fiat_currency}\n"
+                text += f"   Tipo: {u_type} | Órdenes: {orders} | Tasa: {rate_str}\n\n"
+        else:
+            text += "No hay anuncios de compra disponibles.\n\n"
+
+        if sell_ads:
+            text += "🔴 ANUNCIOS DE VENTA (Top 5)\n"
+            text += "=" * 60 + "\n\n"
+            for i, ad in enumerate(sell_ads[:5], 1):
+                m_name = ad.get('merchant_name', 'N/A')
+                price = ZinliMonitorDesktopApp.fmt_es(ad.get('price'), self.decimals)
+                available = ZinliMonitorDesktopApp.fmt_es(ad.get('available_amount'), 2)
+                min_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('min_amount'), 0)
+                max_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('max_amount'), 0)
+                u_type = ad.get('user_type', 'N/A')
+                orders = ad.get('order_count', 'N/A')
+                rate = ad.get('completion_rate')
+                rate_str = f"{rate:.1f}%" if isinstance(rate, (int, float)) else "N/A"
+
+                text += f"{i}. {m_name}\n"
+                text += f"   Precio: {price} {self.price_currency}\n"
+                text += f"   Disponible: {available} USDT\n"
+                text += f"   Límites: {min_amt} - {max_amt} {self.fiat_currency}\n"
+                text += f"   Tipo: {u_type} | Órdenes: {orders} | Tasa: {rate_str}\n\n"
+        else:
+            text += "No hay anuncios de venta disponibles.\n\n"
+
+        if buy_ads and sell_ads:
+            buy_prices = [ad.get('price') for ad in buy_ads if isinstance(ad.get('price'), (int, float))]
+            sell_prices = [ad.get('price') for ad in sell_ads if isinstance(ad.get('price'), (int, float))]
+            if buy_prices and sell_prices:
+                best_buy = min(buy_prices)
+                best_sell = max(sell_prices)
+                spread_pct = ((best_buy - best_sell) / best_sell) * 100 if best_sell else 0.0
+
+                text += "📈 SPREAD DEL MERCADO\n"
+                text += "=" * 60 + "\n"
+                text += f"Mejor precio compra: {ZinliMonitorDesktopApp.fmt_es(best_buy, self.decimals)} {self.price_currency}\n"
+                text += f"Mejor precio venta:  {ZinliMonitorDesktopApp.fmt_es(best_sell, self.decimals)} {self.price_currency}\n"
+                text += f"Spread porcentual:   {spread_pct:.2f}%\n\n"
+
+        self.ads_text.setText(text)
+
+
+class SykloDialog(QDialog):
+    """Diálogo para mostrar ofertas estructuradas de Syklo"""
+    
+    def __init__(self, title: str, data: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(650)
+        self.data = data
+        self.decimals = 4 if "USDC/USD" in title else 2
+        self.setup_ui()
+        self.display_data()
+
+    def setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        title_label = QLabel(f"🔄 {self.windowTitle()}")
+        title_label.setObjectName("TituloSeccion")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+        layout.addSpacing(10)
+        
+        self.data_text = QTextEdit()
+        self.data_text.setReadOnly(True)
+        self.data_text.setMinimumHeight(500)
+        layout.addWidget(self.data_text)
+        
+        btn_cerrar = QPushButton("Cerrar")
+        btn_cerrar.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cerrar.clicked.connect(self.accept)
+        layout.addWidget(btn_cerrar)
+
+    def display_data(self) -> None:
+        text = ""
+        if isinstance(self.data, dict) and "buy" in self.data and "sell" in self.data:
+            buy_data = self.data.get("buy", {})
+            sell_data = self.data.get("sell", {})
+            
+            text += "🟢 ANUNCIOS DE COMPRA (VES → USDC)\n"
+            text += "=" * 60 + "\n\n"
+            buy_orders = buy_data.get("orders", []) if isinstance(buy_data, dict) else []
+            if buy_orders:
+                for i, order in enumerate(buy_orders[:10], 1):
+                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
+                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
+                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full") or order.get("method", "N/A")
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price} Bs\n"
+                    text += f"   Mínimo: {min_amt}\n"
+                    text += f"   Máximo: {max_amt}\n"
+                    text += f"   Trader: {trader}\n\n"
+            else:
+                text += "No hay órdenes de compra disponibles.\n\n"
+            
+            text += "🔴 ANUNCIOS DE VENTA (USDC → VES)\n"
+            text += "=" * 60 + "\n\n"
+            sell_orders = sell_data.get("orders", []) if isinstance(sell_data, dict) else []
+            if sell_orders:
+                for i, order in enumerate(sell_orders[:10], 1):
+                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
+                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
+                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full") or order.get("method", "N/A")
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price} Bs\n"
+                    text += f"   Mínimo: {min_amt}\n"
+                    text += f"   Máximo: {max_amt}\n"
+                    text += f"   Trader: {trader}\n\n"
+            else:
+                text += "No hay órdenes de venta disponibles.\n\n"
+                
+        else:
+            orders = self.data.get("orders", []) if isinstance(self.data, dict) else []
+            if orders:
+                text += f"Total órdenes disponibles: {len(orders)}\n"
+                if isinstance(self.data, dict) and self.data.get("description"):
+                    text += f"Descripción: {self.data.get('description')}\n"
+                text += "=" * 60 + "\n\n"
+                
+                for i, order in enumerate(orders[:10], 1):
+                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
+                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
+                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full") or order.get("method", "N/A")
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price}\n"
+                    text += f"   Mínimo: {min_amt}\n"
+                    text += f"   Máximo: {max_amt}\n"
+                    text += f"   Trader: {trader}\n\n"
+            else:
+                text += "No hay datos u órdenes disponibles en Syklo.\n"
+        
+        self.data_text.setText(text)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ventana Principal de la Aplicación
+# ──────────────────────────────────────────────────────────────────────────────
 class ZinliMonitorDesktopApp(QWidget):
     """Aplicación principal de escritorio"""
     
@@ -933,6 +1193,9 @@ class ZinliMonitorDesktopApp(QWidget):
         dialog.setLayout(layout)
         dialog.exec()
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Pestaña de Arbitraje
+    # ──────────────────────────────────────────────────────────────────────────
     def setup_arbitrage(self) -> None:
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 5, 15, 15)
@@ -957,33 +1220,82 @@ class ZinliMonitorDesktopApp(QWidget):
         self.arbitrage_tab.setLayout(layout)
         QTimer.singleShot(1500, self.analyze_arbitrage)
 
+    def analyze_arbitrage(self) -> None:
+        self.arbitrage_text.setText("Analizando oportunidades...")
+        try:
+            analysis = self.monitor.analyze_current_arbitrage()
+            text = f"Timestamp: {analysis.get('timestamp', 'N/A')}\n"
+            text += f"Total oportunidades: {analysis.get('total_opportunities', 0)}\n\n"
+            
+            if analysis.get('opportunities'):
+                for i, opp in enumerate(analysis['opportunities'], 1):
+                    text += f"{i}. {opp.get('type', '').upper()}\n"
+                    text += f"   Descripción: {opp.get('description', 'N/A')}\n"
+                    text += f"   Spread: {opp.get('spread_percent', 0):.2f}%\n"
+                    text += f"   Recomendación: {opp.get('recommendation', 'N/A')}\n\n"
+            else:
+                text += "No se detectaron oportunidades de arbitraje significativas."
+            
+            self.arbitrage_text.setText(text)
+        except Exception as e:
+            self.arbitrage_text.setText(f"Error: {e}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Pestaña de Historial Refactorizada
+    # ──────────────────────────────────────────────────────────────────────────
     def setup_history(self) -> None:
+        """Configura la pestaña de Historial con tabla interactiva y tarjetas KPI"""
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 5, 15, 15)
-        layout.setSpacing(18)
+        layout.setSpacing(14)
 
-        lbl_titulo = QLabel("📈 Historial BCV")
+        lbl_titulo = QLabel("📈 Historial de Tasas de Cambio")
         lbl_titulo.setObjectName("TituloSeccion")
         lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_titulo)
 
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("Modo:"))
+        # Barra de Filtros
+        filter_card = QFrame()
+        filter_card.setObjectName("CalcCard")
+        filter_layout = QHBoxLayout(filter_card)
+        filter_layout.setContentsMargins(12, 8, 12, 8)
+        filter_layout.setSpacing(10)
+
+        filter_layout.addWidget(QLabel("Modo:"))
         self.history_mode = QComboBox()
         self.history_mode.addItems([
-            "Últimos N días", "Día específico", "Mes específico",
-            "Mes en curso", "Año específico", "Año en curso",
+            "Últimos N días",
+            "Rango Personalizado (Desde - Hasta)",
+            "Impacto Días de Quincena (15 y 30)",
+            "Día específico",
+            "Mes específico",
+            "Mes en curso",
+            "Año específico",
+            "Año en curso",
         ])
-        self.history_mode.setCurrentIndex(0)
         self.history_mode.currentIndexChanged.connect(self._on_history_mode_change)
-        mode_layout.addWidget(self.history_mode)
+        filter_layout.addWidget(self.history_mode)
 
-        self.days_label = QLabel("Período (días):")
+        self.days_label = QLabel("Días:")
         self.days_spinbox = QSpinBox()
         self.days_spinbox.setRange(1, 365)
         self.days_spinbox.setValue(30)
-        mode_layout.addWidget(self.days_label)
-        mode_layout.addWidget(self.days_spinbox)
+        filter_layout.addWidget(self.days_label)
+        filter_layout.addWidget(self.days_spinbox)
+
+        self.lbl_date_from = QLabel("Desde:")
+        self.date_from = QDateEdit()
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate.currentDate().addDays(-30))
+
+        self.lbl_date_to = QLabel("Hasta:")
+        self.date_to = QDateEdit()
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate())
+
+        for w in (self.lbl_date_from, self.date_from, self.lbl_date_to, self.date_to):
+            w.setVisible(False)
+            filter_layout.addWidget(w)
 
         self.date_label = QLabel("Fecha:")
         self.date_edit = QDateEdit()
@@ -991,8 +1303,8 @@ class ZinliMonitorDesktopApp(QWidget):
         self.date_edit.setDate(QDate.currentDate())
         self.date_label.setVisible(False)
         self.date_edit.setVisible(False)
-        mode_layout.addWidget(self.date_label)
-        mode_layout.addWidget(self.date_edit)
+        filter_layout.addWidget(self.date_label)
+        filter_layout.addWidget(self.date_edit)
 
         self.month_label = QLabel("Mes:")
         self.month_spin = QSpinBox()
@@ -1000,8 +1312,8 @@ class ZinliMonitorDesktopApp(QWidget):
         self.month_spin.setValue(QDate.currentDate().month())
         self.month_label.setVisible(False)
         self.month_spin.setVisible(False)
-        mode_layout.addWidget(self.month_label)
-        mode_layout.addWidget(self.month_spin)
+        filter_layout.addWidget(self.month_label)
+        filter_layout.addWidget(self.month_spin)
 
         self.year_label = QLabel("Año:")
         self.year_spin = QSpinBox()
@@ -1009,25 +1321,293 @@ class ZinliMonitorDesktopApp(QWidget):
         self.year_spin.setValue(QDate.currentDate().year())
         self.year_label.setVisible(False)
         self.year_spin.setVisible(False)
-        mode_layout.addWidget(self.year_label)
-        mode_layout.addWidget(self.year_spin)
+        filter_layout.addWidget(self.year_label)
+        filter_layout.addWidget(self.year_spin)
 
-        mode_layout.addStretch()
-        layout.addLayout(mode_layout)
-
-        self.history_text = QTextEdit()
-        self.history_text.setReadOnly(True)
-        self.history_text.setMinimumHeight(500)
-        layout.addWidget(self.history_text)
-
-        btn_obtener = QPushButton("Obtener Historial")
+        btn_obtener = QPushButton("🔍 Consultar")
         btn_obtener.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_obtener.clicked.connect(self.get_history)
-        layout.addWidget(btn_obtener)
+        filter_layout.addWidget(btn_obtener)
 
-        layout.addStretch()
+        filter_layout.addStretch()
+        layout.addWidget(filter_card)
+
+        # Tarjetas KPI Resumen
+        kpi_layout = QHBoxLayout()
+        kpi_layout.setSpacing(10)
+
+        self.kpi_min = RateCard("📉 Mínimo", "--", "Período")
+        self.kpi_max = RateCard("📈 Máximo", "--", "Período")
+        self.kpi_avg = RateCard("📊 Promedio", "--", "Período")
+        self.kpi_var = RateCard("⚡ Variación Total", "--", "Acumulado")
+
+        kpi_layout.addWidget(self.kpi_min)
+        kpi_layout.addWidget(self.kpi_max)
+        kpi_layout.addWidget(self.kpi_avg)
+        kpi_layout.addWidget(self.kpi_var)
+        layout.addLayout(kpi_layout)
+
+        # Tabla Interactiva QTableWidget
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(4)
+        self.history_table.setHorizontalHeaderLabels(["Fecha", "Tasa Oficial (Bs)", "Variación Diaria", "Tendencia"])
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #061420;
+                gridline-color: #102a3f;
+                border: 1px solid #102a3f;
+                border-radius: 6px;
+                color: #d1d5db;
+                font-size: 13px;
+            }
+            QTableWidget::item { padding: 6px; }
+            QTableWidget::item:alternate { background-color: #030d16; }
+            QHeaderView::section {
+                background-color: #0a1e30;
+                color: #ffffff;
+                font-weight: bold;
+                border: 1px solid #102a3f;
+                padding: 6px;
+            }
+        """)
+        layout.addWidget(self.history_table, 1)
+
         self.history_tab.setLayout(layout)
 
+    def _on_history_mode_change(self, index: int) -> None:
+        mode = self.history_mode.currentText()
+        
+        # Resetear estado de visibilidad y re-habilitar el selector de año
+        for w in (self.days_label, self.days_spinbox, self.date_label, self.date_edit,
+                  self.month_label, self.month_spin, self.year_label, self.year_spin,
+                  self.lbl_date_from, self.date_from, self.lbl_date_to, self.date_to):
+            w.setVisible(False)
+
+        self.year_spin.setEnabled(True)  # Siempre re-habilitar
+        current_qdate = QDate.currentDate()
+
+        if mode == "Últimos N días":
+            self.days_label.setText("Días:")
+            self.days_label.setVisible(True)
+            self.days_spinbox.setVisible(True)
+        elif mode == "Rango Personalizado (Desde - Hasta)":
+            self.lbl_date_from.setVisible(True)
+            self.date_from.setVisible(True)
+            self.lbl_date_to.setVisible(True)
+            self.date_to.setVisible(True)
+        elif mode == "Impacto Días de Quincena (15 y 30)":
+            self.days_label.setText("Días atrás:")
+            self.days_label.setVisible(True)
+            self.days_spinbox.setVisible(True)
+            self.days_spinbox.setValue(60)
+        elif mode == "Día específico":
+            self.date_label.setVisible(True)
+            self.date_edit.setVisible(True)
+        elif mode == "Mes específico":
+            self.month_label.setVisible(True)
+            self.month_spin.setVisible(True)
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+        elif mode == "Mes en curso":
+            self.month_spin.setValue(current_qdate.month())
+            self.year_spin.setValue(current_qdate.year())
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+        elif mode == "Año específico":
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+        elif mode == "Año en curso":
+            self.year_spin.setValue(current_qdate.year())
+            self.year_spin.setEnabled(False)  # Deshabilitar solo en Año en curso
+            self.year_label.setVisible(True)
+            self.year_spin.setVisible(True)
+
+    def _extract_price(self, item: dict) -> Optional[float]:
+        if not isinstance(item, dict):
+            return None
+        for k in ("dollar", "USD", "rate", "price"):
+            v = item.get(k)
+            if v is None:
+                continue
+            try:
+                return float(v)
+            except Exception:
+                try:
+                    return float(str(v).replace(',', '.'))
+                except Exception:
+                    continue
+        return None
+
+    def get_history(self) -> None:
+        """Calcula los rangos de fechas exactos para cada filtro y llena la tabla"""
+        mode = self.history_mode.currentText()
+        today = datetime.now()
+        current_year = today.year
+        current_month = today.month
+
+        try:
+            start_str: Optional[str] = None
+            end_str: Optional[str] = None
+            max_limit: Optional[int] = None
+
+            if mode == "Últimos N días":
+                days = self.days_spinbox.value()
+                max_limit = days
+                end_dt = today
+                start_dt = end_dt - timedelta(days=days * 2)  # Extra para margen de fines de semana
+                start_str = start_dt.strftime("%Y-%m-%d")
+                end_str = end_dt.strftime("%Y-%m-%d")
+
+            elif mode == "Rango Personalizado (Desde - Hasta)":
+                start_str = self.date_from.date().toString("yyyy-MM-dd")
+                end_str = self.date_to.date().toString("yyyy-MM-dd")
+
+            elif mode == "Impacto Días de Quincena (15 y 30)":
+                days = self.days_spinbox.value()
+                end_dt = today
+                start_dt = end_dt - timedelta(days=days)
+                start_str = start_dt.strftime("%Y-%m-%d")
+                end_str = end_dt.strftime("%Y-%m-%d")
+
+            elif mode == "Día específico":
+                start_str = self.date_edit.date().toString("yyyy-MM-dd")
+                end_str = start_str
+
+            elif mode == "Mes específico":
+                month = self.month_spin.value()
+                year = self.year_spin.value()
+                last_day = calendar.monthrange(year, month)[1]
+                start_str = f"{year}-{month:02d}-01"
+                end_str = f"{year}-{month:02d}-{last_day:02d}"
+
+            elif mode == "Mes en curso":
+                start_str = f"{current_year}-{current_month:02d}-01"
+                end_str = today.strftime("%Y-%m-%d")
+
+            elif mode == "Año específico":
+                year = self.year_spin.value()
+                start_str = f"{year}-01-01"
+                end_str = f"{year}-12-31"
+
+            elif mode == "Año en curso":
+                start_str = f"{current_year}-01-01"
+                end_str = today.strftime("%Y-%m-%d")
+
+            # Consultar backend
+            res = self.monitor.get_bcv_history(0, start_str, end_str)
+            raw_rates = res.get("rates", []) if isinstance(res, dict) else []
+
+            if not raw_rates:
+                QMessageBox.information(self, "Historial", "No se encontraron registros para el período seleccionado.")
+                return
+
+            # Agrupar y depurar registros únicos por fecha
+            by_date = {}
+            for item in raw_rates:
+                if not isinstance(item, dict):
+                    continue
+                d = item.get("date") or item.get("fecha")
+                p = self._extract_price(item)
+                if d and p is not None:
+                    if start_str and end_str:
+                        if start_str <= d <= end_str:
+                            by_date[d] = p
+                    else:
+                        by_date[d] = p
+
+            # Filtrar quincena si aplica
+            if mode == "Impacto Días de Quincena (15 y 30)":
+                by_date = {
+                    d: p for d, p in by_date.items()
+                    if int(d.split("-")[2]) in (14, 15, 16, 28, 29, 30, 31)
+                }
+
+            clean_data = [{"date": d, "price": p} for d, p in by_date.items()]
+            clean_data.sort(key=lambda x: x["date"])  # Orden cronológico ascendente
+
+            # Limitar a N días si corresponde
+            if max_limit and len(clean_data) > max_limit:
+                clean_data = clean_data[-max_limit:]
+
+            if not clean_data:
+                QMessageBox.information(self, "Historial", "No se encontraron registros válidos para el filtro especificado.")
+                return
+
+            # Calcular KPIs generales del conjunto filtrado
+            prices = [x["price"] for x in clean_data]
+            min_p, max_p = min(prices), max(prices)
+            avg_p = sum(prices) / len(prices)
+            var_total = ((clean_data[-1]["price"] - clean_data[0]["price"]) / clean_data[0]["price"]) * 100 if clean_data[0]["price"] else 0.0
+
+            self.kpi_min.update_value(f"{min_p:.2f} Bs")
+            self.kpi_max.update_value(f"{max_p:.2f} Bs")
+            self.kpi_avg.update_value(f"{avg_p:.2f} Bs")
+            
+            var_color = "#10B981" if var_total >= 0 else "#EF4444"
+            self.kpi_var.update_value(f"{var_total:+.2f}%")
+            self.kpi_var.lbl_valor.setStyleSheet(f"color: {var_color}; font-weight: bold;")
+
+            # Anotar variaciones interdiarias
+            annotated_data = []
+            for i, entry in enumerate(clean_data):
+                if i > 0:
+                    prev = clean_data[i-1]["price"]
+                    curr = entry["price"]
+                    var_day = ((curr - prev) / prev * 100) if prev else 0.0
+                else:
+                    var_day = 0.0
+                annotated_data.append({
+                    "date": entry["date"],
+                    "price": entry["price"],
+                    "var_day": var_day
+                })
+
+            # Mostrar fechas más recientes en la parte superior (Fila 1)
+            display_list = list(reversed(annotated_data))
+            self.history_table.setRowCount(len(display_list))
+
+            for row_idx, entry in enumerate(display_list):
+                date_str = entry["date"]
+                price = entry["price"]
+                var_day = entry["var_day"]
+
+                item_date = QTableWidgetItem(date_str)
+                item_date.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                item_price = QTableWidgetItem(self.fmt_es(price, 2) + " Bs")
+                item_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+                item_var = QTableWidgetItem(f"{var_day:+.2f}%")
+                item_var.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                if var_day > 0:
+                    item_var.setForeground(QColor("#10B981"))
+                    item_trend = QTableWidgetItem("▲ Sube")
+                    item_trend.setForeground(QColor("#10B981"))
+                elif var_day < 0:
+                    item_var.setForeground(QColor("#EF4444"))
+                    item_trend = QTableWidgetItem("▼ Baja")
+                    item_trend.setForeground(QColor("#EF4444"))
+                else:
+                    item_var.setForeground(QColor("#8892b0"))
+                    item_trend = QTableWidgetItem("➔ Estable")
+                    item_trend.setForeground(QColor("#8892b0"))
+
+                item_trend.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+                self.history_table.setItem(row_idx, 0, item_date)
+                self.history_table.setItem(row_idx, 1, item_price)
+                self.history_table.setItem(row_idx, 2, item_var)
+                self.history_table.setItem(row_idx, 3, item_trend)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error cargando historial: {e}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Pestañas de Estadísticas, Análisis 24h y Proyecciones
+    # ──────────────────────────────────────────────────────────────────────────
     def setup_stats(self) -> None:
         layout = QVBoxLayout()
         layout.setContentsMargins(15, 5, 15, 15)
@@ -1060,164 +1640,14 @@ class ZinliMonitorDesktopApp(QWidget):
         layout.addStretch()
         self.stats_tab.setLayout(layout)
 
-    def analyze_arbitrage(self) -> None:
-        self.arbitrage_text.setText("Analizando oportunidades...")
+    def get_stats(self) -> None:
+        hours = self.hours_spinbox.value()
+        self.stats_text.setText(f"Calculando estadísticas de {hours} horas...")
         try:
-            analysis = self.monitor.analyze_current_arbitrage()
-            text = f"Timestamp: {analysis.get('timestamp', 'N/A')}\n"
-            text += f"Total oportunidades: {analysis.get('total_opportunities', 0)}\n\n"
-            
-            if analysis.get('opportunities'):
-                for i, opp in enumerate(analysis['opportunities'], 1):
-                    text += f"{i}. {opp.get('type', '').upper()}\n"
-                    text += f"   Descripción: {opp.get('description', 'N/A')}\n"
-                    text += f"   Spread: {opp.get('spread_percent', 0):.2f}%\n"
-                    text += f"   Recomendación: {opp.get('recommendation', 'N/A')}\n\n"
-            else:
-                text += "No se detectaron oportunidades de arbitraje significativas."
-            
-            self.arbitrage_text.setText(text)
+            stats = self.monitor.get_statistics(hours)
+            self.stats_text.setText(f"Puntos de datos: {stats.get('data_points', 0)}")
         except Exception as e:
-            self.arbitrage_text.setText(f"Error: {e}")
-
-    def _extract_price(self, item: dict) -> Optional[float]:
-        if not isinstance(item, dict):
-            return None
-        for k in ("dollar", "USD", "rate", "price"):
-            v = item.get(k)
-            if v is None:
-                continue
-            try:
-                return float(v)
-            except Exception:
-                try:
-                    return float(str(v).replace(',', '.'))
-                except Exception:
-                    continue
-        return None
-
-    def _on_history_mode_change(self, index: int) -> None:
-        mode = self.history_mode.currentText()
-        self.days_label.setVisible(False)
-        self.days_spinbox.setVisible(False)
-        self.date_label.setVisible(False)
-        self.date_edit.setVisible(False)
-        self.month_label.setVisible(False)
-        self.month_spin.setVisible(False)
-        self.year_label.setVisible(False)
-        self.year_spin.setVisible(False)
-
-        if mode == "Últimos N días":
-            self.days_label.setVisible(True)
-            self.days_spinbox.setVisible(True)
-        elif mode == "Día específico":
-            self.date_label.setVisible(True)
-            self.date_edit.setVisible(True)
-        elif mode == "Mes específico":
-            self.month_label.setVisible(True)
-            self.month_spin.setVisible(True)
-            self.year_label.setVisible(True)
-            self.year_spin.setEnabled(True)
-            self.year_spin.setVisible(True)
-        elif mode == "Mes en curso":
-            self.year_label.setVisible(True)
-            self.year_spin.setEnabled(True)
-            self.year_spin.setVisible(True)
-            self.year_spin.setValue(QDate.currentDate().year())
-        elif mode == "Año específico":
-            self.year_label.setVisible(True)
-            self.year_spin.setEnabled(True)
-            self.year_spin.setVisible(True)
-        elif mode == "Año en curso":
-            self.year_label.setVisible(True)
-            self.year_spin.setVisible(True)
-            self.year_spin.setValue(QDate.currentDate().year())
-            self.year_spin.setEnabled(False)
-
-    def get_history(self) -> None:
-        mode = self.history_mode.currentText()
-        self.history_text.setText("Obteniendo historial...")
-
-        try:
-            if mode == "Últimos N días":
-                days = self.days_spinbox.value()
-                history = self.monitor.get_bcv_history(days)
-                if not isinstance(history, dict):
-                    self.history_text.setPlainText(f"Error obteniendo historial: {history}")
-                    return
-                raw_rates = history.get('rates', []) or []
-                start_date = history.get('start_date')
-                end_date = history.get('end_date')
-
-                from datetime import datetime, timedelta
-                try:
-                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-                except Exception:
-                    start_dt = None
-                    end_dt = None
-
-                last_by_date = {}
-                for entry in raw_rates:
-                    if isinstance(entry, dict):
-                        d = entry.get('date') or entry.get('fecha')
-                        if d:
-                            last_by_date[d] = entry
-
-                dates = []
-                if start_dt and end_dt:
-                    cur = start_dt
-                    while cur <= end_dt:
-                        dates.append(cur.strftime("%Y-%m-%d"))
-                        cur += timedelta(days=1)
-                else:
-                    dates = sorted(last_by_date.keys())
-
-                rates = [last_by_date.get(d) or {'date': d, 'USD': None} for d in dates]
-                n = len(rates)
-                BLOCK_SIZE = 15
-                title = f"Período: {start_date} a {end_date}\nTotal registros esperados: {days}\nFuente: {history.get('source')}\nMostrando {n} registros\n\n"
-
-                if n == 0:
-                    body = "No hay registros para el período solicitado.<br>"
-                elif n <= BLOCK_SIZE:
-                    lines = [f"{i}. {r.get('date')}: {self._extract_price(r):.2f} Bs" if self._extract_price(r) else f"{i}. {r.get('date')}: - Bs" for i, r in enumerate(rates, 1)]
-                    body = "<br>".join(lines) + "<br>"
-                else:
-                    num_blocks = (n + BLOCK_SIZE - 1) // BLOCK_SIZE
-                    grid = [["" for _ in range(num_blocks)] for _ in range(BLOCK_SIZE)]
-                    for idx, entry in enumerate(rates):
-                        b = idx // BLOCK_SIZE
-                        r = idx % BLOCK_SIZE
-                        p = self._extract_price(entry)
-                        grid[r][b] = f"{idx+1}. {entry.get('date')}: {p:.2f} Bs" if p else f"{idx+1}. {entry.get('date')}: - Bs"
-
-                    rows_html = []
-                    for r in range(BLOCK_SIZE):
-                        cols_html = [f'<td style="padding:1px 6px; font-family: monospace;">{grid[r][c]}</td>' if grid[r][c] else '<td>&nbsp;</td>' for c in range(num_blocks)]
-                        rows_html.append('<tr>' + ''.join(cols_html) + '</tr>')
-                    body = '<table style="border-collapse:collapse;">' + ''.join(rows_html) + '</table>'
-
-                numeric_rates = [self._extract_price(r) for r in rates if self._extract_price(r) is not None]
-                stats_html = ''
-                if numeric_rates:
-                    minimo, maximo = min(numeric_rates), max(numeric_rates)
-                    promedio = sum(numeric_rates) / len(numeric_rates)
-                    var = ((maximo - minimo) / minimo * 100) if minimo else 0.0
-                    color = '#10B981' if var > 0 else '#EF4444' if var < 0 else '#9CA3AF'
-                    stats_html = f'<div style="margin-top:10px;"><b>Mínimo:</b> {minimo:.2f} Bs | <b>Máximo:</b> {maximo:.2f} Bs | <b>Promedio:</b> {promedio:.2f} Bs | <b>Variación:</b> <span style="color:{color};">{var:+.2f}%</span></div>'
-
-                self.history_text.setHtml(f'<div style="color:#d1d5db;"><pre>{title}</pre>{body}{stats_html}</div>')
-
-            elif mode == "Día específico":
-                date_str = self.date_edit.date().toString("yyyy-MM-dd")
-                result = self.monitor.get_bcv_rate_by_date(date_str)
-                if isinstance(result, dict) and 'rate' in result:
-                    self.history_text.setPlainText(f"Fecha: {date_str}\nPrecio: {float(result['rate']):.2f} Bs\nFuente: {result.get('source')}")
-                else:
-                    self.history_text.setPlainText(f"No se encontró dato para {date_str}")
-        except Exception as e:
-            self.history_text.setText(f"Error: {e}")
+            self.stats_text.setText(f"Error: {e}")
 
     def setup_24h_analysis(self) -> None:
         layout = QVBoxLayout()
@@ -1242,6 +1672,25 @@ class ZinliMonitorDesktopApp(QWidget):
         layout.addStretch()
         self.analysis_24h_tab.setLayout(layout)
         QTimer.singleShot(2000, self.analyze_24h)
+
+    def analyze_24h(self) -> None:
+        self.analysis_24h_text.setText("Analizando datos históricos por hora...")
+        try:
+            from src.database import DatabaseManager
+            db = DatabaseManager()
+            conn = db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT side, avg_price, timestamp FROM binance_p2p_prices WHERE pair = 'USDT/VES' ORDER BY timestamp ASC")
+            records = cursor.fetchall()
+            conn.close()
+            
+            if not records:
+                self.analysis_24h_text.setText("❌ No hay datos suficientes recopilados en la base de datos.")
+                return
+            
+            self.analysis_24h_text.setText(f"📊 Registros analizados: {len(records)}\nAnálisis en curso...")
+        except Exception as e:
+            self.analysis_24h_text.setText(f"❌ Error: {e}")
 
     def setup_projections(self) -> None:
         layout = QVBoxLayout()
@@ -1274,16 +1723,6 @@ class ZinliMonitorDesktopApp(QWidget):
         layout.addStretch()
         self.projections_tab.setLayout(layout)
         QTimer.singleShot(2500, self.calculate_projections)
-
-    def setup_calculator_tab(self) -> None:
-        outer_layout = QVBoxLayout()
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-
-        self._calc_widget = CalculatorDialog(self)
-        self._calc_widget.setWindowFlags(Qt.WindowType.Widget)
-        outer_layout.addWidget(self._calc_widget)
-        self.calculator_tab.setLayout(outer_layout)
 
     def calculate_projections(self) -> None:
         self.projections_text.setText("Obteniendo datos de BCV...")
@@ -1387,33 +1826,15 @@ class ZinliMonitorDesktopApp(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error mostrando gráfico: {e}")
 
-    def analyze_24h(self) -> None:
-        self.analysis_24h_text.setText("Analizando datos históricos por hora...")
-        try:
-            from src.database import DatabaseManager
-            db = DatabaseManager()
-            conn = db._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT side, avg_price, timestamp FROM binance_p2p_prices WHERE pair = 'USDT/VES' ORDER BY timestamp ASC")
-            records = cursor.fetchall()
-            conn.close()
-            
-            if not records:
-                self.analysis_24h_text.setText("❌ No hay datos suficientes recopilados en la base de datos.")
-                return
-            
-            self.analysis_24h_text.setText(f"📊 Registros analizados: {len(records)}\nAnálisis en curso...")
-        except Exception as e:
-            self.analysis_24h_text.setText(f"❌ Error: {e}")
+    def setup_calculator_tab(self) -> None:
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-    def get_stats(self) -> None:
-        hours = self.hours_spinbox.value()
-        self.stats_text.setText(f"Calculando estadísticas de {hours} horas...")
-        try:
-            stats = self.monitor.get_statistics(hours)
-            self.stats_text.setText(f"Puntos de datos: {stats.get('data_points', 0)}")
-        except Exception as e:
-            self.stats_text.setText(f"Error: {e}")
+        self._calc_widget = CalculatorDialog(self)
+        self._calc_widget.setWindowFlags(Qt.WindowType.Widget)
+        outer_layout.addWidget(self._calc_widget)
+        self.calculator_tab.setLayout(outer_layout)
 
     def refresh_dashboard(self) -> None:
         self.loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1433,265 +1854,9 @@ class ZinliMonitorDesktopApp(QWidget):
         self.refresh_thread.start()
 
 
-class RateCard(QFrame):
-    """Tarjeta de tasa con evento clicable"""
-    clicked = pyqtSignal()
-    
-    def __init__(self, title: str, value: str, subtitle: str, clickable: bool = False) -> None:
-        super().__init__()
-        self.setObjectName("Tarjeta")
-        self.clickable = clickable
-        if clickable:
-            self.setProperty("clicable", "true")
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 12, 20, 15)
-        layout.setSpacing(6)
-
-        lbl_titulo = QLabel(title)
-        lbl_titulo.setObjectName("TituloSeccion")
-        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(lbl_titulo)
-
-        self.lbl_valor = QLabel(value)
-        self.lbl_valor.setObjectName("Valor")
-        self.lbl_valor.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.lbl_valor)
-
-        self.lbl_subtitulo = QLabel(subtitle)
-        self.lbl_subtitulo.setObjectName("Subtitulo")
-        self.lbl_subtitulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.lbl_subtitulo)
-    
-    def mousePressEvent(self, event: Any) -> None:
-        if self.clickable and event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(event)
-    
-    def update_value(self, new_value: Any) -> None:
-        self.lbl_valor.setText(str(new_value))
-    
-    def update_subtitle(self, new_subtitle: Any) -> None:
-        self.lbl_subtitulo.setText(str(new_subtitle))
-
-
-class BinanceAdsDialog(QDialog):
-    """Diálogo para mostrar anuncios estructurados de Binance P2P"""
-    
-    def __init__(self, title: str, data: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(650)
-        self.data = data
-        
-        if "Zinli" in title or "USD" in title:
-            self.fiat_currency = "USD"
-            self.price_currency = "USD"
-            self.decimals = 3
-        else:
-            self.fiat_currency = "VES"
-            self.price_currency = "VES"
-            self.decimals = 2
-
-        self.setup_ui()
-        self.display_ads()
-    
-    def setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        title_label = QLabel(f"📊 {self.windowTitle()}")
-        title_label.setObjectName("TituloSeccion")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title_label)
-        layout.addSpacing(10)
-        
-        self.ads_text = QTextEdit()
-        self.ads_text.setReadOnly(True)
-        self.ads_text.setMinimumHeight(500)
-        layout.addWidget(self.ads_text)
-        
-        btn_cerrar = QPushButton("Cerrar")
-        btn_cerrar.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cerrar.clicked.connect(self.accept)
-        layout.addWidget(btn_cerrar)
-    
-    def display_ads(self) -> None:
-        """Presenta las ofertas de Binance estructuradas por renglones"""
-        text = ""
-        buy_ads = self.data.get("top_buy_ads", []) if isinstance(self.data, dict) else []
-        sell_ads = self.data.get("top_sell_ads", []) if isinstance(self.data, dict) else []
-
-        # --- COMPRA ---
-        if buy_ads:
-            text += "🟢 ANUNCIOS DE COMPRA (Top 5 - Comerciantes Verificados)\n"
-            text += "=" * 60 + "\n\n"
-            for i, ad in enumerate(buy_ads[:5], 1):
-                m_name = ad.get('merchant_name', 'N/A')
-                price = ZinliMonitorDesktopApp.fmt_es(ad.get('price'), self.decimals)
-                available = ZinliMonitorDesktopApp.fmt_es(ad.get('available_amount'), 2)
-                min_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('min_amount'), 0)
-                max_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('max_amount'), 0)
-                u_type = ad.get('user_type', 'N/A')
-                orders = ad.get('order_count', 'N/A')
-                rate = ad.get('completion_rate')
-                rate_str = f"{rate:.1f}%" if isinstance(rate, (int, float)) else "N/A"
-
-                text += f"{i}. {m_name}\n"
-                text += f"   Precio: {price} {self.price_currency}\n"
-                text += f"   Disponible: {available} USDT\n"
-                text += f"   Límites: {min_amt} - {max_amt} {self.fiat_currency}\n"
-                text += f"   Tipo: {u_type} | Órdenes: {orders} | Tasa: {rate_str}\n\n"
-        else:
-            text += "No hay anuncios de compra disponibles.\n\n"
-
-        # --- VENTA ---
-        if sell_ads:
-            text += "🔴 ANUNCIOS DE VENTA (Top 5)\n"
-            text += "=" * 60 + "\n\n"
-            for i, ad in enumerate(sell_ads[:5], 1):
-                m_name = ad.get('merchant_name', 'N/A')
-                price = ZinliMonitorDesktopApp.fmt_es(ad.get('price'), self.decimals)
-                available = ZinliMonitorDesktopApp.fmt_es(ad.get('available_amount'), 2)
-                min_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('min_amount'), 0)
-                max_amt = ZinliMonitorDesktopApp.fmt_es(ad.get('max_amount'), 0)
-                u_type = ad.get('user_type', 'N/A')
-                orders = ad.get('order_count', 'N/A')
-                rate = ad.get('completion_rate')
-                rate_str = f"{rate:.1f}%" if isinstance(rate, (int, float)) else "N/A"
-
-                text += f"{i}. {m_name}\n"
-                text += f"   Precio: {price} {self.price_currency}\n"
-                text += f"   Disponible: {available} USDT\n"
-                text += f"   Límites: {min_amt} - {max_amt} {self.fiat_currency}\n"
-                text += f"   Tipo: {u_type} | Órdenes: {orders} | Tasa: {rate_str}\n\n"
-        else:
-            text += "No hay anuncios de venta disponibles.\n\n"
-
-        # --- SPREAD ---
-        if buy_ads and sell_ads:
-            buy_prices = [ad.get('price') for ad in buy_ads if isinstance(ad.get('price'), (int, float))]
-            sell_prices = [ad.get('price') for ad in sell_ads if isinstance(ad.get('price'), (int, float))]
-            if buy_prices and sell_prices:
-                best_buy = min(buy_prices)
-                best_sell = max(sell_prices)
-                spread_pct = ((best_buy - best_sell) / best_sell) * 100 if best_sell else 0.0
-
-                text += "📈 SPREAD DEL MERCADO\n"
-                text += "=" * 60 + "\n"
-                text += f"Mejor precio compra: {ZinliMonitorDesktopApp.fmt_es(best_buy, self.decimals)} {self.price_currency}\n"
-                text += f"Mejor precio venta:  {ZinliMonitorDesktopApp.fmt_es(best_sell, self.decimals)} {self.price_currency}\n"
-                text += f"Spread porcentual:   {spread_pct:.2f}%\n\n"
-
-        self.ads_text.setText(text)
-
-
-class SykloDialog(QDialog):
-    """Diálogo para mostrar ofertas estructuradas de Syklo"""
-    
-    def __init__(self, title: str, data: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(650)
-        self.data = data
-        self.decimals = 4 if "USDC/USD" in title else 2
-        self.setup_ui()
-        self.display_data()
-
-    def setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        
-        title_label = QLabel(f"🔄 {self.windowTitle()}")
-        title_label.setObjectName("TituloSeccion")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title_label)
-        layout.addSpacing(10)
-        
-        self.data_text = QTextEdit()
-        self.data_text.setReadOnly(True)
-        self.data_text.setMinimumHeight(500)
-        layout.addWidget(self.data_text)
-        
-        btn_cerrar = QPushButton("Cerrar")
-        btn_cerrar.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_cerrar.clicked.connect(self.accept)
-        layout.addWidget(btn_cerrar)
-
-    def display_data(self) -> None:
-        """Formatea las órdenes de Syklo en texto ordenado y legible por líneas"""
-        text = ""
-        
-        # Estructura combinada (Compra y Venta)
-        if isinstance(self.data, dict) and "buy" in self.data and "sell" in self.data:
-            buy_data = self.data.get("buy", {})
-            sell_data = self.data.get("sell", {})
-            
-            # --- COMPRA ---
-            text += "🟢 ANUNCIOS DE COMPRA (VES → USDC)\n"
-            text += "=" * 60 + "\n\n"
-            buy_orders = buy_data.get("orders", []) if isinstance(buy_data, dict) else []
-            if buy_orders:
-                for i, order in enumerate(buy_orders[:10], 1):
-                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
-                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
-                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
-                    trader = order.get("trader", "N/A")
-                    method = order.get("method_full") or order.get("method", "N/A")
-                    
-                    text += f"{i}. Método: {method}\n"
-                    text += f"   Precio: {price} Bs\n"
-                    text += f"   Mínimo: {min_amt}\n"
-                    text += f"   Máximo: {max_amt}\n"
-                    text += f"   Trader: {trader}\n\n"
-            else:
-                text += "No hay órdenes de compra disponibles.\n\n"
-            
-            # --- VENTA ---
-            text += "🔴 ANUNCIOS DE VENTA (USDC → VES)\n"
-            text += "=" * 60 + "\n\n"
-            sell_orders = sell_data.get("orders", []) if isinstance(sell_data, dict) else []
-            if sell_orders:
-                for i, order in enumerate(sell_orders[:10], 1):
-                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
-                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
-                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
-                    trader = order.get("trader", "N/A")
-                    method = order.get("method_full") or order.get("method", "N/A")
-                    
-                    text += f"{i}. Método: {method}\n"
-                    text += f"   Precio: {price} Bs\n"
-                    text += f"   Mínimo: {min_amt}\n"
-                    text += f"   Máximo: {max_amt}\n"
-                    text += f"   Trader: {trader}\n\n"
-            else:
-                text += "No hay órdenes de venta disponibles.\n\n"
-                
-        # Estructura simple (USD/USDC u órdenes directas)
-        else:
-            orders = self.data.get("orders", []) if isinstance(self.data, dict) else []
-            if orders:
-                text += f"Total órdenes disponibles: {len(orders)}\n"
-                if isinstance(self.data, dict) and self.data.get("description"):
-                    text += f"Descripción: {self.data.get('description')}\n"
-                text += "=" * 60 + "\n\n"
-                
-                for i, order in enumerate(orders[:10], 1):
-                    price = ZinliMonitorDesktopApp.fmt_es(order.get("price"), self.decimals)
-                    min_amt = ZinliMonitorDesktopApp.fmt_es(order.get("min"), self.decimals)
-                    max_amt = ZinliMonitorDesktopApp.fmt_es(order.get("max"), self.decimals)
-                    trader = order.get("trader", "N/A")
-                    method = order.get("method_full") or order.get("method", "N/A")
-                    
-                    text += f"{i}. Método: {method}\n"
-                    text += f"   Precio: {price}\n"
-                    text += f"   Mínimo: {min_amt}\n"
-                    text += f"   Máximo: {max_amt}\n"
-                    text += f"   Trader: {trader}\n\n"
-            else:
-                text += "No hay datos u órdenes disponibles en Syklo.\n"
-        
-        self.data_text.setText(text)
-
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Punto de Entrada Principal
+# ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
     app = QApplication(sys.argv)
     window = ZinliMonitorDesktopApp()
