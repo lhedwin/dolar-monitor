@@ -133,10 +133,14 @@ class SykloProvider:
         
         return orders
     
-    def filter_orders(self, orders: List[Dict], send_methods: List[str]) -> List[Dict]:
+    def filter_orders_by_send(self, orders: List[Dict], send_methods: List[str]) -> List[Dict]:
         """Filtra órdenes por métodos de envío"""
         return [order for order in orders if order.get("method") in send_methods]
     
+    def filter_orders_by_receive(self, orders: List[Dict], receive_methods: List[str]) -> List[Dict]:
+        """Filtra órdenes por métodos de recepción"""
+        return [order for order in orders if order.get("method") in receive_methods]
+
     def get_ves_usdc_info(self) -> Dict:
         """Obtiene información de VES→USDC (bancos venezolanos)"""
         if self.config:
@@ -170,7 +174,7 @@ class SykloProvider:
             }
         
         orders = self.parse_orderbook_data(data, method_aliases)
-        filtered_orders = self.filter_orders(orders, send_methods)
+        filtered_orders = self.filter_orders_by_send(orders, send_methods)
         filtered_orders.sort(key=lambda x: float(x.get("price", 0) if x.get("price") != "-" else 0), reverse=True)
         
         # Calcular promedio de precios excluyendo órdenes cuya min > 5 y max < 20
@@ -203,6 +207,56 @@ class SykloProvider:
             "avg_price": avg_price,
         }
     
+    def get_usdc_ves_info(self) -> Dict:
+        """Obtiene información de USDC→VES (venta de USDC por VES)"""
+        if self.config:
+            send_pms = self.config.get("syklo.usdc_ves.send_pms", "USDC:ALL:SYKLO")
+            receive_pms = self.config.get("syklo.usdc_ves.receive_pms", "VES:VE:VEBN1,VES:VE:VEBN2")
+            method_aliases = self.config.get("syklo.usdc_ves.method_aliases", {
+                "VEBN1": "Banco de Venezuela",
+                "VEBN2": "Banesco",
+            })
+            receive_methods = self.config.get("syklo.usdc_ves.receive_methods", ["VEBN1", "VEBN2"])
+        else:
+            send_pms = "USDC:ALL:SYKLO"
+            receive_pms = "VES:VE:VEBN1,VES:VE:VEBN2"
+            method_aliases = {
+                "VEBN1": "Banco de Venezuela",
+                "VEBN2": "Banesco",
+            }
+            receive_methods = ["VEBN1", "VEBN2"]
+        
+        url = f"{self.base_url}/book?send_pms={send_pms}&receive_pms={receive_pms}"
+        
+        data = self.fetch_orderbook_data(url)
+        if not data:
+            return {
+                "source": "Syklo Swap",
+                "pair": "USDC/VES",
+                "error": "No se pudieron obtener datos",
+                "timestamp": None
+            }
+        
+        orders = self.parse_orderbook_data(data, method_aliases)
+        filtered_orders = self.filter_orders_by_receive(orders, receive_methods)
+        filtered_orders.sort(key=lambda x: float(x.get("price", 0) if x.get("price") != "-" else 0), reverse=True)
+        
+        # Calcular promedio de precios
+        prices_for_avg = [float(o.get("price")) for o in filtered_orders if o.get("price") != "-"]
+        avg_price = (sum(prices_for_avg) / len(prices_for_avg)) if prices_for_avg else None
+        
+        self.last_update = datetime.now()
+        
+        return {
+            "source": "Syklo Swap",
+            "pair": "USDC/VES",
+            "description": "Envías USDC y recibes Bolívares en Banesco o Banco de Venezuela",
+            "timestamp": self.last_update.isoformat(),
+            "orders": filtered_orders[:20],
+            "total_orders": len(filtered_orders),
+            "avg_price": avg_price,
+        }
+
     def get_usdc_usd_info(self) -> Dict:
         """Obtiene información de USDC→USD/ZI"""
         if self.config:
@@ -226,7 +280,7 @@ class SykloProvider:
             }
         
         orders = self.parse_orderbook_data(data)
-        filtered_orders = self.filter_orders(orders, send_methods)
+        filtered_orders = self.filter_orders_by_send(orders, send_methods)
         filtered_orders.sort(key=lambda x: float(x.get("price", 0) if x.get("price") != "-" else 0), reverse=True)
         
         self.last_update = datetime.now()

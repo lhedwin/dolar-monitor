@@ -286,8 +286,8 @@ class CalculatorDialog(QDialog):
         self.chk_bcv       = QCheckBox("💵 BCV")
         self.chk_eur       = QCheckBox("💶 Euro (BCV)")
         self.chk_binance   = QCheckBox("📈 Binance Compra")
-        self.chk_syklo_ves = QCheckBox("🔄 Syklo VES/USDC")
-        for chk in (self.chk_bcv, self.chk_eur, self.chk_binance, self.chk_syklo_ves):
+        self.chk_syklo     = QCheckBox("🔄 Syklo Compra")
+        for chk in (self.chk_bcv, self.chk_eur, self.chk_binance, self.chk_syklo):
             chk.setChecked(True)
             checks_row.addWidget(chk)
         checks_row.addStretch()
@@ -380,6 +380,8 @@ class CalculatorDialog(QDialog):
 
             # 4. Syklo VES/USDC → Bs/USDC (≈ Bs/USD)
             syklo_ves = data.get("syklo_ves_usdc", {})
+            syklo_usdc_ves = data.get("syklo_usdc_ves", {})
+            
             if "error" not in syklo_ves:
                 avg = syklo_ves.get("avg_price")
                 if avg is None:
@@ -394,6 +396,21 @@ class CalculatorDialog(QDialog):
                     avg = sum(prices) / len(prices) if prices else None
                 if avg:
                     self.rates["Syklo VES/USDC"] = {"ves_per_usd": float(avg), "icon": "🔄", "is_eur": False}
+            
+            if "error" not in syklo_usdc_ves:
+                avg = syklo_usdc_ves.get("avg_price")
+                if avg is None:
+                    prices = []
+                    for o in syklo_usdc_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
+                            try:
+                                prices.append(float(p))
+                            except Exception:
+                                pass
+                    avg = sum(prices) / len(prices) if prices else None
+                if avg:
+                    self.rates["Syklo Venta"] = {"ves_per_usd": float(avg), "icon": "📈", "is_eur": False}
 
             self._rates_ready = True
             self.lbl_status.setText(f"✅ Fuentes cargadas — listo para calcular")
@@ -431,12 +448,14 @@ class CalculatorDialog(QDialog):
             self.lbl_amount.setText("MONTO EN VES (Bs)")
             self.lbl_target.setText("DIVISA (DESTINO)")
             self.chk_binance.setText("📈 Binance Compra")
+            self.chk_syklo.setText("🔄 Syklo Compra")
             if self.amount_input.value() < 100:
                 self.amount_input.setValue(1000.0)
         else:
             self.lbl_amount.setText(f"MONTO EN {foreign} ({sym})")
             self.lbl_target.setText("CONVERTIR A: VES (Bs)")
-            self.chk_binance.setText("📉 Binance Venta")
+            self.chk_binance.setText("📈 Binance Venta")
+            self.chk_syklo.setText("🔄 Syklo Venta")
             if self.amount_input.value() >= 1000:
                 self.amount_input.setValue(100.0)
 
@@ -467,13 +486,14 @@ class CalculatorDialog(QDialog):
             return
 
         binance_key = "Binance Compra" if self.is_ves_to_foreign else "Binance Venta"
+        syklo_key = "Syklo VES/USDC" if self.is_ves_to_foreign else "Syklo Venta"
 
         # Filtro de fuentes activas
         source_filter = {
             "BCV":            self.chk_bcv.isChecked(),
             "Euro (BCV)":     self.chk_eur.isChecked(),
             binance_key:      self.chk_binance.isChecked(),
-            "Syklo VES/USDC": self.chk_syklo_ves.isChecked(),
+            syklo_key:        self.chk_syklo.isChecked(),
         }
 
         results = []  # [(nombre, icono, valor_convertido, tasa_str)]
@@ -861,16 +881,38 @@ class ZinliMonitorDesktopApp(QWidget):
             else:
                 self.binance_usd_card.update_value("Error")
             
-            # Syklo VES/USDC
+            # Syklo VES/USDC - mostrar compra y venta
             syklo_ves = data.get("syklo_ves_usdc", {})
-            if "error" not in syklo_ves:
-                orders = syklo_ves.get("orders", [])
-                if orders and len(orders) > 0:
-                    best_rate = orders[0].get("price", "--")
-                    if best_rate != "--":
-                        self.syklo_ves_card.update_value(f"{self.fmt_es(best_rate)} Bs")
-                    else:
-                        self.syklo_ves_card.update_value("--")
+            syklo_usdc_ves = data.get("syklo_usdc_ves", {})
+            
+            if "error" not in syklo_ves and "error" not in syklo_usdc_ves:
+                buy_avg = syklo_ves.get("avg_price")
+                sell_avg = syklo_usdc_ves.get("avg_price")
+                
+                if buy_avg is None:
+                    prices = []
+                    for o in syklo_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
+                            try:
+                                prices.append(float(p))
+                            except Exception:
+                                pass
+                    buy_avg = sum(prices) / len(prices) if prices else None
+                
+                if sell_avg is None:
+                    prices = []
+                    for o in syklo_usdc_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
+                            try:
+                                prices.append(float(p))
+                            except Exception:
+                                pass
+                    sell_avg = sum(prices) / len(prices) if prices else None
+                
+                if buy_avg and sell_avg:
+                    self.syklo_ves_card.update_value(f"Buy: {self.fmt_es(buy_avg)}\nSell: {self.fmt_es(sell_avg)}")
                 else:
                     self.syklo_ves_card.update_value("--")
             else:
@@ -907,14 +949,6 @@ class ZinliMonitorDesktopApp(QWidget):
         self.loading_dialog.close()
         QMessageBox.critical(self, "Error", f"Error cargando datos: {error_msg}")
     
-    def show_calculator(self):
-        """Muestra el diálogo de la calculadora de cambio"""
-        try:
-            dialog = CalculatorDialog(self)
-            dialog.exec()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error abriendo calculadora: {e}")
-    
     def setup_dashboard(self):
         """Configura el dashboard usando QFrame como el ejemplo"""
         layout = QVBoxLayout()
@@ -931,12 +965,13 @@ class ZinliMonitorDesktopApp(QWidget):
         cards_layout = QGridLayout()
         cards_layout.setSpacing(12)
         
-        self.bcv_card = RateCard("💵 Tasa BCV", "--", "--")
+        self.bcv_card = RateCard("💵 Tasa BCV", "--", "--", clickable=True)
+        self.bcv_card.clicked.connect(self.show_bcv_dialog)
         self.binance_ves_card = RateCard("📊 Binance VES", "--", "USDT/VES", clickable=True)
         self.binance_ves_card.clicked.connect(self.show_binance_ves_dialog)
         self.binance_usd_card = RateCard("💱 Binance USD (Zinli)", "--", "USDT/USD", clickable=True)
         self.binance_usd_card.clicked.connect(self.show_binance_usd_dialog)
-        self.syklo_ves_card = RateCard("🔄 Syklo VES/USDC", "--", "VES → USDC", clickable=True)
+        self.syklo_ves_card = RateCard("🔄 Syklo VES/USDC", "--", "VES ↔ USDC", clickable=True)
         self.syklo_ves_card.clicked.connect(self.show_syklo_ves_dialog)
         self.syklo_usd_card = RateCard("💲 Syklo USDC/USD", "--", "USDC → USD", clickable=True)
         self.syklo_usd_card.clicked.connect(self.show_syklo_usd_dialog)
@@ -2144,10 +2179,18 @@ class ZinliMonitorDesktopApp(QWidget):
             QMessageBox.critical(self, "Error", f"Error al obtener anuncios: {e}")
     
     def show_syklo_ves_dialog(self):
-        """Muestra diálogo con datos de Syklo VES/USDC"""
+        """Muestra diálogo con datos de Syklo VES/USDC (compra y venta)"""
         try:
-            syklo_data = self.monitor.get_syklo_ves_usdc()
-            dialog = SykloDialog("Syklo - VES/USDC", syklo_data, self)
+            syklo_buy_data = self.monitor.get_syklo_ves_usdc()
+            syklo_sell_data = self.monitor.get_syklo_usdc_ves()
+            
+            # Combinar datos en un solo diccionario para el diálogo
+            combined_data = {
+                "buy": syklo_buy_data,
+                "sell": syklo_sell_data
+            }
+            
+            dialog = SykloDialog("Syklo - VES/USDC (Compra y Venta)", combined_data, self)
             dialog.exec()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error al obtener datos: {e}")
@@ -2158,6 +2201,104 @@ class ZinliMonitorDesktopApp(QWidget):
             syklo_data = self.monitor.get_syklo_usdc_usd()
             dialog = SykloDialog("Syklo - USDC/USD", syklo_data, self)
             dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error al obtener datos: {e}")
+    
+    def show_bcv_dialog(self):
+        """Muestra diálogo con spread entre BCV y otras tasas"""
+        try:
+            # Obtener datos actuales
+            data = self.monitor.get_all_data()
+            
+            bcv_data = data.get("bcv", {})
+            binance_data = data.get("binance_ves", {})
+            syklo_data = data.get("syklo_ves_usdc", {})
+            
+            # Obtener tasas
+            bcv_rate = None
+            if "error" not in bcv_data:
+                r = bcv_data.get("rate")
+                if r and r != "--":
+                    bcv_rate = float(r)
+            
+            binance_rate = None
+            if "error" not in binance_data:
+                sell = binance_data.get("sell_stats", {}).get("avg_price")
+                if sell and sell != "--":
+                    binance_rate = float(sell)
+            
+            syklo_rate = None
+            if "error" not in syklo_data:
+                avg = syklo_data.get("avg_price")
+                if avg is None:
+                    prices = []
+                    for o in syklo_data.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
+                            try:
+                                prices.append(float(p))
+                            except Exception:
+                                pass
+                    avg = sum(prices) / len(prices) if prices else None
+                if avg:
+                    syklo_rate = float(avg)
+            
+            # Calcular Euro BCV
+            euro_rate = bcv_rate * 1.08 if bcv_rate else None
+            
+            # Crear diálogo con spreads
+            dialog = QDialog(self)
+            dialog.setWindowTitle("💵 Spread BCV vs Otras Tasas")
+            dialog.setMinimumWidth(600)
+            
+            layout = QVBoxLayout()
+            
+            # Título
+            title_label = QLabel(f"📊 {dialog.windowTitle()}")
+            title_label.setObjectName("TituloSeccion")
+            title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(title_label)
+            layout.addSpacing(10)
+            
+            # Área de texto para mostrar spreads
+            spreads_text = QTextEdit()
+            spreads_text.setReadOnly(True)
+            spreads_text.setMinimumHeight(400)
+            
+            # Construir contenido
+            content = f"Tasa BCV: ${self.fmt_es(bcv_rate) if bcv_rate else '--'} Bs\n"
+            content += "=" * 60 + "\n\n"
+            
+            if euro_rate:
+                spread_amount = euro_rate - bcv_rate
+                spread_percent = (spread_amount / bcv_rate) * 100 if bcv_rate else 0
+                content += f"📈 Euro BCV: {self.fmt_es(euro_rate)} Bs\n"
+                content += f"   Spread: {self.fmt_es(spread_amount)} Bs ({spread_percent:.2f}%)\n\n"
+            
+            if binance_rate:
+                spread_amount = binance_rate - bcv_rate
+                spread_percent = (spread_amount / bcv_rate) * 100 if bcv_rate else 0
+                content += f"📊 Binance Venta: {self.fmt_es(binance_rate)} Bs\n"
+                content += f"   Spread: {self.fmt_es(spread_amount)} Bs ({spread_percent:.2f}%)\n\n"
+            
+            if syklo_rate:
+                spread_amount = syklo_rate - bcv_rate
+                spread_percent = (spread_amount / bcv_rate) * 100 if bcv_rate else 0
+                content += f"🔄 Syklo VES/USDC: {self.fmt_es(syklo_rate)} Bs\n"
+                content += f"   Spread: {self.fmt_es(spread_amount)} Bs ({spread_percent:.2f}%)\n\n"
+            
+            spreads_text.setText(content)
+            layout.addWidget(spreads_text)
+            
+            # Botón cerrar
+            btn_cerrar = QPushButton("Cerrar")
+            btn_cerrar.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_cerrar.clicked.connect(dialog.accept)
+            layout.addWidget(btn_cerrar)
+            
+            dialog.setLayout(layout)
+            dialog.exec()
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error al obtener datos: {e}")
     
@@ -2227,34 +2368,38 @@ class ZinliMonitorDesktopApp(QWidget):
             else:
                 self.binance_usd_card.update_value("Error")
             
-            # Syklo VES/USDC
+            # Syklo VES/USDC - mostrar compra y venta
             syklo_ves = data.get("syklo_ves_usdc", {})
-            if "error" not in syklo_ves:
-                orders = syklo_ves.get("orders", [])
-                if orders and len(orders) > 0:
-                    # Prefer avg_price returned by provider; fallback to computing average excluding small-range orders
-                    best_rate = syklo_ves.get("avg_price") if syklo_ves.get("avg_price") is not None else None
-                    if best_rate is None:
-                        # compute with same rule: exclude orders with min>5 and max<20
-                        def include_order_for_avg(o):
+            syklo_usdc_ves = data.get("syklo_usdc_ves", {})
+            
+            if "error" not in syklo_ves and "error" not in syklo_usdc_ves:
+                buy_avg = syklo_ves.get("avg_price")
+                sell_avg = syklo_usdc_ves.get("avg_price")
+                
+                if buy_avg is None:
+                    prices = []
+                    for o in syklo_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
                             try:
-                                min_v = float(o.get("min", "-")) if o.get("min", "-") not in (None, "-") else None
+                                prices.append(float(p))
                             except Exception:
-                                min_v = None
+                                pass
+                    buy_avg = sum(prices) / len(prices) if prices else None
+                
+                if sell_avg is None:
+                    prices = []
+                    for o in syklo_usdc_ves.get("orders", []):
+                        p = o.get("price")
+                        if p and p not in ("-", "--"):
                             try:
-                                max_v = float(o.get("max", "-")) if o.get("max", "-") not in (None, "-") else None
+                                prices.append(float(p))
                             except Exception:
-                                max_v = None
-                            if (min_v is not None) and (max_v is not None) and (min_v > 5) and (max_v < 20):
-                                return False
-                            return True
-                        prices = [float(o.get("price")) for o in orders if o.get("price") != "-" and include_order_for_avg(o)]
-                        best_rate = (sum(prices) / len(prices)) if prices else None
-
-                    if best_rate is not None:
-                        self.syklo_ves_card.update_value(f"{best_rate:.2f} Bs")
-                    else:
-                        self.syklo_ves_card.update_value("--")
+                                pass
+                    sell_avg = sum(prices) / len(prices) if prices else None
+                
+                if buy_avg and sell_avg:
+                    self.syklo_ves_card.update_value(f"Buy: {self.fmt_es(buy_avg)}\nSell: {self.fmt_es(sell_avg)}")
                 else:
                     self.syklo_ves_card.update_value("--")
             else:
@@ -2636,44 +2781,126 @@ class SykloDialog(QDialog):
         """Muestra los datos de Syklo"""
         text = ""
         
-        orders = self.data.get("orders", [])
-        if orders:
-            text += f"Total órdenes disponibles: {len(orders)}\n"
-            if self.data.get("description"):
-                text += f"Descripción: {self.data.get('description')}\n"
+        # Verificar si es formato combinado (compra y venta)
+        if "buy" in self.data and "sell" in self.data:
+            # Formato combinado
+            buy_data = self.data["buy"]
+            sell_data = self.data["sell"]
+            
+            # Compra
+            text += "🟢 ANUNCIOS DE COMPRA (VES → USDC)\n"
             text += "=" * 60 + "\n\n"
             
-            for i, order in enumerate(orders[:10], 1):  # Mostrar top 10
-                price = order.get("price", "N/A")
-                min_amount = order.get("min", "N/A")
-                max_amount = order.get("max", "N/A")
-                trader = order.get("trader", "N/A")
-                method = order.get("method_full", order.get("method", "N/A"))
+            buy_orders = buy_data.get("orders", [])
+            if buy_orders:
+                for i, order in enumerate(buy_orders[:10], 1):
+                    price = order.get("price", "N/A")
+                    min_amount = order.get("min", "N/A")
+                    max_amount = order.get("max", "N/A")
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full", order.get("method", "N/A"))
+                    
+                    if price != "N/A" and price != "-":
+                        price_str = f"{float(price):,.2f}"
+                    else:
+                        price_str = "N/A"
+                    
+                    if min_amount != "N/A" and min_amount != "-":
+                        min_str = f"{float(min_amount):,.2f}"
+                    else:
+                        min_str = "N/A"
+                    
+                    if max_amount != "N/A" and max_amount != "-":
+                        max_str = f"{float(max_amount):,.2f}"
+                    else:
+                        max_str = "N/A"
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price_str} Bs\n"
+                    text += f"   Mínimo: {min_str}\n"
+                    text += f"   Máximo: {max_str}\n"
+                    text += f"   Trader: {trader}\n"
+                    text += "\n"
+            else:
+                text += "No hay órdenes de compra disponibles.\n\n"
+            
+            # Venta
+            text += "🔴 ANUNCIOS DE VENTA (USDC → VES)\n"
+            text += "=" * 60 + "\n\n"
+            
+            sell_orders = sell_data.get("orders", [])
+            if sell_orders:
+                for i, order in enumerate(sell_orders[:10], 1):
+                    price = order.get("price", "N/A")
+                    min_amount = order.get("min", "N/A")
+                    max_amount = order.get("max", "N/A")
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full", order.get("method", "N/A"))
+                    
+                    if price != "N/A" and price != "-":
+                        price_str = f"{float(price):,.2f}"
+                    else:
+                        price_str = "N/A"
+                    
+                    if min_amount != "N/A" and min_amount != "-":
+                        min_str = f"{float(min_amount):,.2f}"
+                    else:
+                        min_str = "N/A"
+                    
+                    if max_amount != "N/A" and max_amount != "-":
+                        max_str = f"{float(max_amount):,.2f}"
+                    else:
+                        max_str = "N/A"
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price_str} Bs\n"
+                    text += f"   Mínimo: {min_str}\n"
+                    text += f"   Máximo: {max_str}\n"
+                    text += f"   Trader: {trader}\n"
+                    text += "\n"
+            else:
+                text += "No hay órdenes de venta disponibles.\n\n"
                 
-                # Formatear con decimales dinámicos
-                if price != "N/A" and price != "-":
-                    price_str = f"{float(price):,.{self.decimals}f}"
-                else:
-                    price_str = "N/A"
-                
-                if min_amount != "N/A" and min_amount != "-":
-                    min_str = f"{float(min_amount):,.{self.decimals}f}"
-                else:
-                    min_str = "N/A"
-                
-                if max_amount != "N/A" and max_amount != "-":
-                    max_str = f"{float(max_amount):,.{self.decimals}f}"
-                else:
-                    max_str = "N/A"
-                
-                text += f"{i}. Método: {method}\n"
-                text += f"   Precio: {price_str}\n"
-                text += f"   Mínimo: {min_str}\n"
-                text += f"   Máximo: {max_str}\n"
-                text += f"   Trader: {trader}\n"
-                text += "\n"
         else:
-            text += "No hay datos disponibles\n"
+            # Formato simple (original)
+            orders = self.data.get("orders", [])
+            if orders:
+                text += f"Total órdenes disponibles: {len(orders)}\n"
+                if self.data.get("description"):
+                    text += f"Descripción: {self.data.get('description')}\n"
+                text += "=" * 60 + "\n\n"
+                
+                for i, order in enumerate(orders[:10], 1):  # Mostrar top 10
+                    price = order.get("price", "N/A")
+                    min_amount = order.get("min", "N/A")
+                    max_amount = order.get("max", "N/A")
+                    trader = order.get("trader", "N/A")
+                    method = order.get("method_full", order.get("method", "N/A"))
+                    
+                    # Formatear con decimales dinámicos
+                    if price != "N/A" and price != "-":
+                        price_str = f"{float(price):,.{self.decimals}f}"
+                    else:
+                        price_str = "N/A"
+                    
+                    if min_amount != "N/A" and min_amount != "-":
+                        min_str = f"{float(min_amount):,.{self.decimals}f}"
+                    else:
+                        min_str = "N/A"
+                    
+                    if max_amount != "N/A" and max_amount != "-":
+                        max_str = f"{float(max_amount):,.{self.decimals}f}"
+                    else:
+                        max_str = "N/A"
+                    
+                    text += f"{i}. Método: {method}\n"
+                    text += f"   Precio: {price_str}\n"
+                    text += f"   Mínimo: {min_str}\n"
+                    text += f"   Máximo: {max_str}\n"
+                    text += f"   Trader: {trader}\n"
+                    text += "\n"
+            else:
+                text += "No hay datos disponibles\n"
         
         self.data_text.setText(text)
 

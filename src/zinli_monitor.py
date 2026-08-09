@@ -52,6 +52,7 @@ class ZinliMonitor:
             "binance_ves": self.binance_provider.get_ves_info(),
             "binance_usd_zinli": self.binance_provider.get_usd_zinli_info(),
             "syklo_ves_usdc": self.syklo_provider.get_ves_usdc_info(),
+            "syklo_usdc_ves": self.syklo_provider.get_usdc_ves_info(),
             "syklo_usdc_usd": self.syklo_provider.get_usdc_usd_info(),
         }
         
@@ -79,6 +80,10 @@ class ZinliMonitor:
             # Guardar Syklo VES/USDC
             if isinstance(data.get("syklo_ves_usdc"), dict) and "error" not in data["syklo_ves_usdc"]:
                 self.db.save_syklo_data(data["syklo_ves_usdc"])
+            
+            # Guardar Syklo USDC/VES (venta)
+            if isinstance(data.get("syklo_usdc_ves"), dict) and "error" not in data["syklo_usdc_ves"]:
+                self.db.save_syklo_data(data["syklo_usdc_ves"])
             
             # Guardar Syklo USDC/USD
             if isinstance(data.get("syklo_usdc_usd"), dict) and "error" not in data["syklo_usdc_usd"]:
@@ -111,8 +116,12 @@ class ZinliMonitor:
         return self.binance_provider.get_usd_zinli_info()
     
     def get_syklo_ves_usdc(self) -> Dict:
-        """Obtiene solo orderbook VES/USDC"""
+        """Obtiene solo orderbook VES/USDC (compra de USDC con VES)"""
         return self.syklo_provider.get_ves_usdc_info()
+    
+    def get_syklo_usdc_ves(self) -> Dict:
+        """Obtiene solo orderbook USDC/VES (venta de USDC por VES)"""
+        return self.syklo_provider.get_usdc_ves_info()
     
     def get_syklo_usdc_usd(self) -> Dict:
         """Obtiene solo orderbook USDC/USD"""
