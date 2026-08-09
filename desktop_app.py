@@ -2003,14 +2003,14 @@ class ZinliMonitorDesktopApp(QWidget):
             QMessageBox.critical(self, "Error", f"Error mostrando gráfico: {e}")
     
     def analyze_24h(self):
-        """Analiza las mejores horas para comprar y vender consolidadas por hora del día (00:00 a 23:59)"""
+        """Analiza las mejores horas para comprar y vendiendo todos los datos disponibles"""
         self.analysis_24h_text.setText("Analizando datos históricos por hora del día...")
         
         try:
             from src.database import DatabaseManager
             db = DatabaseManager()
             
-            # Obtener TODOS los registros históricos de Binance USDT/VES acumulados en la BD
+            # Obtener datos de Binance P2P
             conn = db._get_connection()
             cursor = conn.cursor()
             cursor.execute("""
@@ -2019,27 +2019,29 @@ class ZinliMonitorDesktopApp(QWidget):
                 WHERE pair = 'USDT/VES' 
                 ORDER BY timestamp ASC
             """)
-            history = cursor.fetchall()
+            binance_history = cursor.fetchall()
+            
             conn.close()
             
-            if not history:
+            if not binance_history:
                 self.analysis_24h_text.setText(
-                    "No hay datos históricos registrados aún en la base de datos.\n\n"
-                    "Nota: El agente de bandeja de sistema (dolar_monitor_agent.py) recopila y guarda automáticamente "
-                    "los precios cada 10 minutos al encender la PC para ir completando todas las horas del día."
+                    "❌ No hay datos históricos registrados aún en la base de datos.\n\n"
+                    "📝 El agente de bandeja (dolar_monitor_agent.py) recopila datos cada 10 minutos.\n"
+                    "   Deja la aplicación corriendo por lo menos 24-48 horas para obtener análisis completo.\n\n"
+                    "💡 Alternativa: Usa el botón 'Actualizar Dashboard' para ver datos en tiempo real."
                 )
                 return
             
-            # Agrupar precios por hora del día (0 a 23)
+            # Agrupar precios por hora del día
             buy_by_hour = {}
             sell_by_hour = {}
             dates_found = set()
             
             from datetime import datetime
             
-            for record in history:
+            # Procesar datos de Binance
+            for record in binance_history:
                 ts_str = record["timestamp"]
-                # Formato ISO
                 try:
                     dt = datetime.fromisoformat(ts_str)
                 except ValueError:
@@ -2059,7 +2061,7 @@ class ZinliMonitorDesktopApp(QWidget):
                         sell_by_hour[hour] = []
                     sell_by_hour[hour].append(price)
             
-            # Calcular promedios y conteos por hora
+            # Calcular promedios por hora
             buy_avg_by_hour = {}
             sell_avg_by_hour = {}
             
@@ -2071,59 +2073,71 @@ class ZinliMonitorDesktopApp(QWidget):
                 if prices:
                     sell_avg_by_hour[hour] = (sum(prices) / len(prices), len(prices))
             
-            # Cobertura de horas
+            # Calcular horas cubiertas
             hours_covered = len(set(buy_by_hour.keys()).union(set(sell_by_hour.keys())))
             min_date = min(dates_found) if dates_found else "N/A"
             max_date = max(dates_found) if dates_found else "N/A"
             
-            text = f"📊 ANÁLISIS DE MERCADO DIARIO (Binance USDT/VES)\n"
-            text += f"Período analizado: {min_date} a {max_date} ({len(dates_found)} día(s) registrados)\n"
-            text += f"Registros totales: {len(history)} | Horas cubiertas: {hours_covered}/24 h\n"
-            text += "=" * 65 + "\n\n"
+            text = f"📊 ANÁLISIS DE MERCADO DIARIO (Binance P2P USDT/VES)\n"
+            text += f"📅 Período: {min_date} a {max_date} ({len(dates_found)} día(s))\n"
+            text += f"📈 Registros totales: {len(binance_history)}\n"
+            text += f"⏰ Horas cubiertas: {hours_covered}/24 h\n"
+            text += "=" * 70 + "\n\n"
             
-            # Mejores horas para COMPRAR (precio más bajo)
+            # RECOMENDACIONES DE COMPRA
             if buy_avg_by_hour:
-                text += "🟢 MEJORES HORAS PARA COMPRAR (Precio Promedio Más Bajo)\n"
-                text += "-" * 65 + "\n"
+                text += "🟢 MEJORES HORAS PARA COMPRAR USDT (Precio más bajo)\n"
+                text += "-" * 70 + "\n"
                 sorted_buy = sorted(buy_avg_by_hour.items(), key=lambda x: x[1][0])
-                for i, (hour, (avg_price, count)) in enumerate(sorted_buy, 1):
-                    text += f"{i:2d}. {hour:02d}:00 - {hour:02d}:59 → Promedio: {avg_price:.2f} VES  ({count} muestra(s))\n"
-                text += "\n"
-            else:
-                text += "🟢 No hay datos de compra disponibles\n\n"
-            
-            # Mejores horas para VENDER (precio más alto)
-            if sell_avg_by_hour:
-                text += "🔴 MEJORES HORAS PARA VENDER (Precio Promedio Más Alto)\n"
-                text += "-" * 65 + "\n"
-                sorted_sell = sorted(sell_avg_by_hour.items(), key=lambda x: x[1][0], reverse=True)
-                for i, (hour, (avg_price, count)) in enumerate(sorted_sell, 1):
-                    text += f"{i:2d}. {hour:02d}:00 - {hour:02d}:59 → Promedio: {avg_price:.2f} VES  ({count} muestra(s))\n"
-                text += "\n"
-            else:
-                text += "🔴 No hay datos de venta disponibles\n\n"
-            
-            # Calcular spread promedio por hora
-            common_hours = set(buy_avg_by_hour.keys()).intersection(set(sell_avg_by_hour.keys()))
-            if common_hours:
-                text += "📈 MEJORES HORAS POR SPREAD (Margen entre Venta y Compra)\n"
-                text += "-" * 65 + "\n"
-                spreads = []
-                for hour in common_hours:
-                    b_avg, _ = buy_avg_by_hour[hour]
-                    s_avg, _ = sell_avg_by_hour[hour]
-                    spread = s_avg - b_avg
-                    spread_pct = (spread / b_avg) * 100 if b_avg > 0 else 0
-                    spreads.append((hour, spread, spread_pct))
+                best_buy_hour = sorted_buy[0][0] if sorted_buy else None
+                best_buy_price = sorted_buy[0][1][0] if sorted_buy else None
                 
-                spreads.sort(key=lambda x: x[1], reverse=True)
-                for i, (hour, spread, spread_pct) in enumerate(spreads, 1):
-                    text += f"{i:2d}. {hour:02d}:00 - {hour:02d}:59 → Margen: {spread:+.2f} VES ({spread_pct:.2f}%)\n"
+                for i, (hour, (avg_price, count)) in enumerate(sorted_buy[:5], 1):
+                    marker = "⭐ " if hour == best_buy_hour else "   "
+                    text += f"{marker}{i}. {hour:02d}:00-{hour:02d}:59 → {avg_price:.2f} VES ({count} registros)\n"
+                
+                if best_buy_hour is not None:
+                    text += f"\n💡 RECOMENDACIÓN: Comprar alrededor de las {best_buy_hour:02d}:00 para mejor precio\n\n"
+            else:
+                text += "🟢 No hay suficientes datos de compra (necesitas más datos históricos)\n\n"
+            
+            # RECOMENDACIONES DE VENTA
+            if sell_avg_by_hour:
+                text += "🔴 MEJORES HORAS PARA VENDER USDT (Precio más alto)\n"
+                text += "-" * 70 + "\n"
+                sorted_sell = sorted(sell_avg_by_hour.items(), key=lambda x: x[1][0], reverse=True)
+                best_sell_hour = sorted_sell[0][0] if sorted_sell else None
+                best_sell_price = sorted_sell[0][1][0] if sorted_sell else None
+                
+                for i, (hour, (avg_price, count)) in enumerate(sorted_sell[:5], 1):
+                    marker = "⭐ " if hour == best_sell_hour else "   "
+                    text += f"{marker}{i}. {hour:02d}:00-{hour:02d}:59 → {avg_price:.2f} VES ({count} registros)\n"
+                
+                if best_sell_hour is not None:
+                    text += f"\n💡 RECOMENDACIÓN: Vender alrededor de las {best_sell_hour:02d}:00 para mejor precio\n\n"
+            else:
+                text += "🔴 No hay suficientes datos de venta (necesitas más datos históricos)\n\n"
+            
+            # RESUMEN EJECUTIVO
+            text += "📋 RESUMEN EJECUTIVO\n"
+            text += "-" * 70 + "\n"
+            
+            if best_buy_hour is not None and best_sell_hour is not None:
+                if best_buy_price and best_sell_price:
+                    profit_potential = ((best_sell_price - best_buy_price) / best_buy_price) * 100
+                    text += f"🎯 Estrategia óptima: Comprar {best_buy_hour:02d}:00, Vender {best_sell_hour:02d}:00\n"
+                    text += f"💰 Potencial de ganancia: {profit_potential:.1f}%\n"
+            
+            text += f"📊 Cobertura de datos: {hours_covered}/24 horas del día\n"
+            
+            if hours_covered < 12:
+                text += f"⚠️  ADVERTENCIA: Solo tienes {hours_covered} horas cubiertas.\n"
+                text += f"   Deja el agente corriendo más tiempo para análisis completo.\n"
             
             self.analysis_24h_text.setText(text)
             
         except Exception as e:
-            self.analysis_24h_text.setText(f"Error generando análisis: {e}\n\n{str(e)}")
+            self.analysis_24h_text.setText(f"❌ Error generando análisis: {e}\n\n{str(e)}")
     
     def get_stats(self):
         """Obtiene estadísticas"""
