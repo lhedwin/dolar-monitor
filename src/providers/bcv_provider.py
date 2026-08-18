@@ -66,10 +66,11 @@ class BCVProvider:
             response.raise_for_status()
             data = response.json()
             
-            # BCV Today usa "USD" en lugar de "dollar"
+            # BCV Today usa "USD" en lugar de "dollar" y también ofrece "EUR"
             if isinstance(data, dict) and "USD" in data:
                 self.last_rate = {
                     "dollar": data["USD"],
+                    "euro": data.get("EUR", None),
                     "date": data.get("date", ""),
                     "source": "BCV (BCV Today API)"
                 }
@@ -217,13 +218,17 @@ class BCVProvider:
         """Retorna información estructurada de la tasa"""
         rate_data = self.obtener_tasa()
         if isinstance(rate_data, dict):
-            return {
+            result = {
                 "source": "BCV",
                 "timestamp": self.last_update.isoformat() if self.last_update else None,
                 "date": rate_data.get("date"),
                 "rate": float(rate_data.get("dollar", 0)),
                 "formatted": self.formatear_salida(rate_data)
             }
+            # Agregar euro si está disponible
+            if rate_data.get("euro"):
+                result["euro"] = float(rate_data.get("euro", 0))
+            return result
         return {
             "source": "BCV",
             "error": str(rate_data),

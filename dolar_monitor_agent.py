@@ -140,7 +140,13 @@ class DolarMonitorTrayAgent:
                 if rate != "--":
                     r_val = float(rate)
                     bcv_usd_str = f"{r_val:.2f} Bs"
-                    bcv_eur_str = f"{r_val * 1.08:.2f} Bs"
+                    # Usar el valor real del euro de la API si está disponible
+                    if "euro" in bcv_data and bcv_data.get("euro"):
+                        eur_val = float(bcv_data.get("euro"))
+                        bcv_eur_str = f"{eur_val:.2f} Bs"
+                    else:
+                        # Fallback al cálculo aproximado
+                        bcv_eur_str = f"{r_val * 1.08:.2f} Bs"
             
             # Binance VES
             binance_data = data.get("binance_ves", {})

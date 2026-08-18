@@ -430,7 +430,15 @@ class CalculatorDialog(QDialog):
                     bcv_rate = float(r)
                     self.rates["BCV"] = {"ves_per_usd": bcv_rate, "icon": "💵", "is_eur": False}
 
-            if bcv_rate:
+            # Usar el valor real del euro de la API si está disponible
+            eur_rate = None
+            if "error" not in bcv_data and "euro" in bcv_data:
+                eur_rate = bcv_data.get("euro")
+                if eur_rate and eur_rate != "--":
+                    eur_rate = float(eur_rate)
+                    self.rates["Euro (BCV)"] = {"ves_per_eur": eur_rate, "icon": "💶", "is_eur": True}
+            elif bcv_rate:
+                # Fallback al cálculo aproximado si no hay euro en la API
                 eur_bs = bcv_rate * 1.08
                 self.rates["Euro (BCV)"] = {"ves_per_eur": eur_bs, "icon": "💶", "is_eur": True}
 
@@ -1189,7 +1197,12 @@ class ZinliMonitorDesktopApp(QWidget):
                 bcv_rate = bcv_data.get("rate", "--")
                 if bcv_rate != "--":
                     bcv_rate = float(bcv_rate)
-                    euro_rate = bcv_rate * 1.08
+                    # Usar el valor real del euro de la API si está disponible
+                    if "euro" in bcv_data and bcv_data.get("euro"):
+                        euro_rate = float(bcv_data.get("euro"))
+                    else:
+                        # Fallback al cálculo aproximado
+                        euro_rate = bcv_rate * 1.08
                     self.bcv_card.update_value(f"${self.fmt_es(bcv_rate)} Bs\n€{self.fmt_es(euro_rate)} Bs")
                 else:
                     self.bcv_card.update_value("--")
@@ -1350,19 +1363,19 @@ class ZinliMonitorDesktopApp(QWidget):
         bcv_data = data.get("bcv", {})
         binance_data = data.get("binance_ves", {})
         syklo_data = data.get("syklo_ves_usdc", {})
-        
+
         bcv_rate = None
         if "error" not in bcv_data:
             r = bcv_data.get("rate")
             if r and r != "--":
                 bcv_rate = float(r)
-        
+
         binance_rate = None
         if "error" not in binance_data:
             sell = binance_data.get("sell_stats", {}).get("avg_price")
             if sell and sell != "--":
                 binance_rate = float(sell)
-        
+
         syklo_rate = None
         if "error" not in syklo_data:
             avg = syklo_data.get("avg_price")
@@ -1371,8 +1384,14 @@ class ZinliMonitorDesktopApp(QWidget):
                 avg = sum(prices) / len(prices) if prices else None
             if avg:
                 syklo_rate = float(avg)
-        
-        euro_rate = bcv_rate * 1.08 if bcv_rate else None
+
+        # Usar el valor real del euro de la API si está disponible
+        euro_rate = None
+        if "error" not in bcv_data and "euro" in bcv_data and bcv_data.get("euro"):
+            euro_rate = float(bcv_data.get("euro"))
+        elif bcv_rate:
+            # Fallback al cálculo aproximado
+            euro_rate = bcv_rate * 1.08
         
         dialog = QDialog(self)
         dialog.setWindowTitle("💵 Spread BCV vs Otras Tasas")
